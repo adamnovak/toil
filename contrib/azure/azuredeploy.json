@@ -222,7 +222,7 @@
     "nsgName": "node-nsg",
     "nsgID": "[resourceId('Microsoft.Network/networkSecurityGroups',variables('nsgName'))]",
     "storageAccountType": "Standard_GRS",
-    "customScriptLocation": "[concat('https://raw.githubusercontent.com/', parameters('githubSource'), parameters('githubBranch'), '/contrib/azure/')]",
+    "customScriptLocation": "[concat('https://raw.githubusercontent.com/', parameters('githubSource'), '/', parameters('githubBranch'), '/contrib/azure/')]",
     "agentFiles": [
       "agent-0.json",
       "agent-gt0.json"
