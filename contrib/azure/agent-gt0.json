@@ -217,7 +217,7 @@
     },
     {
       "apiVersion": "2015-06-15",
-      "type": "Microsoft.Compute/virtualMachines",
+      "type": "Microsoft.ClassicCompute/virtualMachines",
       "name": "[concat(parameters('agentVMNamePrefix'), copyIndex(1))]",
       "location": "[resourceGroup().location]",
       "copy": {
@@ -276,7 +276,7 @@
         "count": "[parameters('agentCount')]"
       },
       "dependsOn": [
-        "[concat('Microsoft.Compute/virtualMachines/', parameters('agentVMNamePrefix'), copyIndex(1))]"
+        "[concat('Microsoft.ClassicCompute/virtualMachines/', parameters('agentVMNamePrefix'), copyIndex(1))]"
       ],
       "properties": {
         "publisher": "Microsoft.OSTCExtensions",
