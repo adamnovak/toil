@@ -60,7 +60,7 @@ def _fetchAzureAccountKey(accountName):
     
     if "AZURE_ACCOUNT_KEY_{}".format(accountName) in os.environ:
         return os.environ["AZURE_ACCOUNT_KEY_{}".format(accountName)]
-    else if 'AZURE_ACCOUNT_KEY' in os.environ:
+    elif 'AZURE_ACCOUNT_KEY' in os.environ:
         return os.environ['AZURE_ACCOUNT_KEY']
     configParser = RawConfigParser()
     configParser.read(os.path.expanduser(credential_file_path))
