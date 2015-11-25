@@ -165,8 +165,6 @@ class AbstractJobStore(object):
             if jobWrapper.jobStoreID in reachableFromRoot:
                 return
             reachableFromRoot.add(jobWrapper.jobStoreID)
-            if len(reachableFromRoot) % 1000 == 0:
-                logger.info("%d jobs reachable from root..." % len(reachableFromRoot))
             for jobs in jobWrapper.stack:
                 for successorJobStoreID in map(lambda x: x[0], jobs):
                     if successorJobStoreID not in reachableFromRoot and haveJob(successorJobStoreID):
@@ -174,6 +172,7 @@ class AbstractJobStore(object):
 
         logger.info("Checking job graph connectivity...")
         getConnectedJobs(rootJobWrapper)
+        logger.info("%d jobs reachable from root." % len(reachableFromRoot))
 
         # Cleanup the state of each jobWrapper
         for jobWrapper in getJobs():
@@ -200,7 +199,7 @@ class AbstractJobStore(object):
             # those jobs from the stack (this cleans up the case that the jobWrapper
             # had successors to run, but had not been updated to reflect this)
             while len(jobWrapper.stack) > 0:
-                jobs = [command for command in jobWrapper.stack[-1] if self.exists(command[0])]
+                jobs = [command for command in jobWrapper.stack[-1] if haveJob(command[0])]
                 if len(jobs) < len(jobWrapper.stack[-1]):
                     changed = True
                     if len(jobs) > 0:
