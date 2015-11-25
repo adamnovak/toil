@@ -58,8 +58,8 @@ def _fetchAzureAccountKey(accountName):
     accountName2=ACCOUNTKEY2==
     """
     
-    if "AZURE_ACCOUNT_KEY_{}".format(accountName) in os.environ:
-        return os.environ["AZURE_ACCOUNT_KEY_{}".format(accountName)]
+    if "AZURE_ACCOUNT_KEY_%s" % accountName in os.environ:
+        return os.environ["AZURE_ACCOUNT_KEY_%s" % accountName]
     elif 'AZURE_ACCOUNT_KEY' in os.environ:
         return os.environ['AZURE_ACCOUNT_KEY']
     configParser = RawConfigParser()
@@ -160,7 +160,7 @@ class AzureJobStore(AbstractJobStore):
                 # If we run out of pages, stop
                 break
                 
-            logging.info("Processed {} total jobs".format(total_processed))
+            logging.info("Processed %d total jobs" % total_processed))
 
     def create(self, command, memory, cores, disk,
                predecessorNumber=0):

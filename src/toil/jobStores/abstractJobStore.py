@@ -148,7 +148,7 @@ class AbstractJobStore(object):
                 return jobCache[jobId]
             else:
                 if jobCache is not None:
-                    logger.warning("Cache miss for job {}".format(jobId))
+                    logger.warning("Cache miss for job %s" % jobId)
                 return self.load(jobId)
                 
         def getJobs():
@@ -162,7 +162,7 @@ class AbstractJobStore(object):
                 return
             reachableFromRoot.add(jobWrapper.jobStoreID)
             if len(reachableFromRoot) % 100 == 0:
-                logger.info("{} jobs reachable from root...".format(len(reachableFromRoot)))
+                logger.info("%d jobs reachable from root..." % len(reachableFromRoot))
             for jobs in jobWrapper.stack:
                 for successorJobStoreID in map(lambda x: x[0], jobs):
                     if successorJobStoreID not in reachableFromRoot and self.exists(

@@ -282,6 +282,7 @@ class ToilState( object ):
         # Jobs that are ready to be processed
         self.updatedJobs = set( )
         ##Algorithm to build this information
+        logger.info("(Re)building internal scheduler state")
         self._buildToilState(rootJob, jobStore, jobCache)
 
     def _buildToilState(self, jobWrapper, jobStore, jobCache=None):
