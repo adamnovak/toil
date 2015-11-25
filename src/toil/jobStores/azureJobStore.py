@@ -131,27 +131,31 @@ class AzureJobStore(AbstractJobStore):
         next_partition_key = None
         next_row_key = None
     
+        # How many jobs have we done?
+        total_processed = 0
+    
         while True:
             # Get a page (up to 1000 items)
             page = self.jobItems.query_entities(
                 next_partition_key=next_partition_key,
                 next_row_key=next_row_key)
             
-            logging.warning("Page: {}".format(page))
-            logging.warning("Continuation: {}".format(page.x_ms_continuation))
-            
             for jobEntity in page:
                 # Process the items in the page
                 yield AzureJob.fromEntity(jobEntity)
+                total_processed += 1
                 
-            # Next time ask for the next page
-            # The spec gives these in upper case, but they're actually lower case.
+            # Next time ask for the next page. If you use .get() you need the
+            # lower-case evrsions, but this is some kind of fancy case-
+            # insensitive dictionary.
             next_partition_key = page.x_ms_continuation['NextPartitionKey']
             next_row_key = page.x_ms_continuation['NextRowKey']
             
             if not next_partition_key and not next_row_key:
                 # If we run out of pages, stop
                 break
+                
+            logging.info("Processed {} total jobs".format(total_processed))
 
     def create(self, command, memory, cores, disk,
                predecessorNumber=0):
