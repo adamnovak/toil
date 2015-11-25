@@ -155,8 +155,6 @@ class AbstractJobStore(object):
             else:
                 return self.exists(jobId)
                 
-        def have
-                
         def getJobs():
             if jobCache is not None:
                 return jobCache.itervalues()
