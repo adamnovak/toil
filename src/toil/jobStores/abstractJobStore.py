@@ -141,7 +141,7 @@ class AbstractJobStore(object):
         reachableFromRoot = set()
 
         if jobCache is None:
-            logger.warning("Cleaning jobStore recursively.")
+            logger.warning("Cleaning jobStore recursively. This may be slow.")
 
         def getJob(jobId):
             if jobCache is not None:

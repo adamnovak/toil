@@ -270,8 +270,6 @@ class ToilState( object ):
     Represents a snapshot of the jobs in the jobStore.
     """
     def __init__( self, jobStore, rootJob, jobCache=None):
-        if jobCache is None:
-            logger.warning("Building ToilState recursively.")
         
         # This is a hash of jobs, referenced by jobStoreID, to their predecessor jobs.
         self.successorJobStoreIDToPredecessorJobs = { }

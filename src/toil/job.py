@@ -420,10 +420,10 @@ class Job(object):
             """
             setLoggingFromOptions(options)
             with setupToil(options, userScript=job.getUserScript()) as (config, batchSystem, jobStore):
-                logger.warning("Downloading entire JobStore")
+                logger.info("Downloading entire JobStore")
                 jobCache = {jobWrapper.jobStoreID: jobWrapper
                     for jobWrapper in jobStore.jobs()}
-                logger.warning("{} jobs downloaded.".format(len(jobCache)))
+                logger.info("{} jobs downloaded.".format(len(jobCache)))
                 if options.restart:
                     #This cleans up any half written jobs after a restart
                     jobStore.clean(job._loadRootJob(jobStore), jobCache=jobCache) 
