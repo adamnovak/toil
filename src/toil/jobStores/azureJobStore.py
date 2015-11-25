@@ -122,8 +122,25 @@ class AzureJobStore(AbstractJobStore):
         return self.namePrefix + self.nameSeparator + name
 
     def jobs(self):
-        for jobEntity in self.jobItems.query_entities():
-            yield AzureJob.fromEntity(jobEntity)
+        # We need to page through the results, since we only get some of them at
+        # a time. Just like in the BlobService (although it isn't really
+        # documented...)
+        marker = None
+    
+        while True:
+            # Get a page
+            page = self.jobItems.query_entities(marker=marker)
+            
+            for jobEntity in page:
+                # Process the items in the page
+                yield AzureJob.fromEntity(jobEntity)
+                
+            # Next time ask for the next page
+            marker = page.next_marker
+            
+            if not marker:
+                # If we run out of pages, stop
+                break
 
     def create(self, command, memory, cores, disk,
                predecessorNumber=0):
