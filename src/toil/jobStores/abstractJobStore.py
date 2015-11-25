@@ -161,12 +161,15 @@ class AbstractJobStore(object):
             if jobWrapper.jobStoreID in reachableFromRoot:
                 return
             reachableFromRoot.add(jobWrapper.jobStoreID)
+            if len(reachableFromRoot) % 100 == 0:
+                logger.info("{} jobs reachable from root...".format(len(reachableFromRoot)))
             for jobs in jobWrapper.stack:
                 for successorJobStoreID in map(lambda x: x[0], jobs):
                     if successorJobStoreID not in reachableFromRoot and self.exists(
                             successorJobStoreID):
                         getConnectedJobs(getJob(successorJobStoreID))
 
+        logger.info("Checking job graph connectivity...")
         getConnectedJobs(rootJobWrapper)
 
         # Cleanup the state of each jobWrapper
@@ -218,10 +221,14 @@ class AbstractJobStore(object):
                 changed = True
 
             if changed:  # Update, but only if a change has occurred
+                logger.critical("Repairing job: %s" % jobWrapper.jobStoreID)
                 self.update(jobWrapper)
 
         # Remove any crufty stats/logging files from the previous run
+        logger.info("Discarding old statistics and logs...")
         self.readStatsAndLogging(lambda x: None)
+        
+        logger.info("Job store is clean")
 
     ##########################################
     # The following methods deal with creating/loading/updating/writing/checking for the
