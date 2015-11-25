@@ -146,10 +146,10 @@ class AzureJobStore(AbstractJobStore):
                 total_processed += 1
                 
             # Next time ask for the next page. If you use .get() you need the
-            # lower-case evrsions, but this is some kind of fancy case-
-            # insensitive dictionary.
-            next_partition_key = page.x_ms_continuation['NextPartitionKey']
-            next_row_key = page.x_ms_continuation['NextRowKey']
+            # lower-case keys, even though with [] the docs ask for upper case.
+            # This is some kind of fancy case-insensitive dictionary.
+            next_partition_key = page.x_ms_continuation.get('nextpartitionkey', None)
+            next_row_key = page.x_ms_continuation.get('nextrowkey', None)
             
             if not next_partition_key and not next_row_key:
                 # If we run out of pages, stop
