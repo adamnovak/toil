@@ -145,8 +145,9 @@ class AzureJobStore(AbstractJobStore):
                 yield AzureJob.fromEntity(jobEntity)
                 
             # Next time ask for the next page
-            next_partition_key = page.x_ms_continuation.get('NextPartitionKey', None)
-            next_row_key = page.x_ms_continuation.get('NextRowKey', None)
+            # The spec gives these in upper case, but they're actually lower case.
+            next_partition_key = page.x_ms_continuation['NextPartitionKey']
+            next_row_key = page.x_ms_continuation['NextRowKey']
             
             if not next_partition_key and not next_row_key:
                 # If we run out of pages, stop
