@@ -61,7 +61,7 @@ def main():
         logger.warning("Downloading entire JobStore")
         jobCache = {jobWrapper.jobStoreID: jobWrapper
             for jobWrapper in jobStore.jobs()}
-        logger.warning("Jobs downloaded.")
+        logger.warning("{} jobs downloaded.".format(len(jobCache)))
         jobStore.clean(Job._loadRootJob(jobStore), jobCache=jobCache)
         mainLoop(config, batchSystem, jobStore, Job._loadRootJob(jobStore), jobCache=jobCache)
     

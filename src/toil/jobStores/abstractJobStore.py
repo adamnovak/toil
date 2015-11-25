@@ -144,9 +144,11 @@ class AbstractJobStore(object):
             logger.warning("Cleaning jobStore recursively.")
 
         def getJob(jobId):
-            if jobCache is not None:
+            if jobCache is not None and jobCache.has_key(jobId):
                 return jobCache[jobId]
             else:
+                if jobCache is not None:
+                    logger.warning("Cache miss for job {}".format(jobId))
                 return self.load(jobId)
                 
         def getJobs():

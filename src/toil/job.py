@@ -423,7 +423,10 @@ class Job(object):
                 logger.warning("Downloading entire JobStore")
                 jobCache = {jobWrapper.jobStoreID: jobWrapper
                     for jobWrapper in jobStore.jobs()}
-                logger.warning("Jobs downloaded.")
+                logger.warning("{} jobs downloaded.".format(len(jobCache)))
+                for k, v in jobCache.iteritems():
+                    logger.warning("Example: {} -> {}".format(k, v))
+                    break
                 if options.restart:
                     #This cleans up any half written jobs after a restart
                     jobStore.clean(job._loadRootJob(jobStore), jobCache=jobCache) 
