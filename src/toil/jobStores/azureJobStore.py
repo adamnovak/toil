@@ -40,7 +40,7 @@ from toil.jobStores.abstractJobStore import (AbstractJobStore, NoSuchJobExceptio
                                              NoSuchFileException)
 import toil.lib.encryption as encryption
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 credential_file_path = '~/.toilAzureCredentials'
 
@@ -84,7 +84,7 @@ class AzureJobStore(AbstractJobStore):
 
         # Table names have strict requirements in Azure
         self.namePrefix = self._sanitizeTableName(namePrefix)
-        log.debug("Creating job store with name prefix '%s'" % self.namePrefix)
+        logger.debug("Creating job store with name prefix '%s'" % self.namePrefix)
 
         # These are the main API entrypoints.
         self.tableService = TableService(account_key=self.account_key, account_name=accountName)
@@ -715,11 +715,11 @@ def retry_on_error(num_tries=5, retriable_exceptions=(socket.error, socket.gaier
             if last:
                 raise
             else:
-                log.info("Got a retriable exception %s, trying again" % e.__class__.__name__)
+                logger.info("Got a retriable exception %s, trying again" % e.__class__.__name__)
         except Exception as e:
             # For other exceptions, the retriable_check function determines whether to retry
             if retriable_check(e):
-                log.info("Exception %s passed predicate, trying again" % e.__class__.__name__)
+                logger.info("Exception %s passed predicate, trying again" % e.__class__.__name__)
             else:
                 raise
         else:
