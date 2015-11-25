@@ -123,22 +123,29 @@ class AzureJobStore(AbstractJobStore):
 
     def jobs(self):
         # We need to page through the results, since we only get some of them at
-        # a time. Just like in the BlobService (although it isn't really
-        # documented...)
-        marker = None
+        # a time. Just like in the BlobService. See the only documentation
+        # available: the API bindings source code, at:
+        # https://github.com/Azure/azure-storage-python/blob/09e9f186740407672777d6cb6646c33a2273e1a8/azure/storage/table/tableservice.py#L385
+        
+        # These two together constitute the primary key for an item.
+        next_partition_key = None
+        next_row_key = None
     
         while True:
-            # Get a page
-            page = self.jobItems.query_entities(marker=marker)
+            # Get a page (up to 1000 items)
+            page = self.jobItems.query_entities(
+                next_partition_key=next_partition_key,
+                next_row_key=next_row_key)
             
             for jobEntity in page:
                 # Process the items in the page
                 yield AzureJob.fromEntity(jobEntity)
                 
             # Next time ask for the next page
-            marker = page.next_marker
+            next_partition_key = page.x_ms_continuation.get('NextPartitionKey', None)
+            next_row_key = page.x_ms_continuation.get('NextRowKey', None)
             
-            if not marker:
+            if not next_partition_key and not next_row_key:
                 # If we run out of pages, stop
                 break
 
