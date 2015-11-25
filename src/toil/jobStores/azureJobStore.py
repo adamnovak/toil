@@ -160,7 +160,7 @@ class AzureJobStore(AbstractJobStore):
                 # If we run out of pages, stop
                 break
                 
-            logging.info("Processed %d total jobs" % total_processed))
+            logging.info("Processed %d total jobs" % total_processed)
 
     def create(self, command, memory, cores, disk,
                predecessorNumber=0):
