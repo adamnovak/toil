@@ -137,6 +137,9 @@ class AzureJobStore(AbstractJobStore):
                 next_partition_key=next_partition_key,
                 next_row_key=next_row_key)
             
+            logging.warning("Page: {}".format(page))
+            logging.warning("Continuation: {}".format(page.x_ms_continuation))
+            
             for jobEntity in page:
                 # Process the items in the page
                 yield AzureJob.fromEntity(jobEntity)
