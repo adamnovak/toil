@@ -125,16 +125,35 @@ class AbstractJobStore(object):
 
     ##Cleanup functions
 
-    def clean(self, rootJobWrapper):
+    def clean(self, rootJobWrapper, jobCache=None):
         """
         Function to cleanup the state of a jobStore after a restart.
         Fixes jobs that might have been partially updated.
         Resets the try counts.
-        Removes jobs that are not successors of the rootJobWrapper. 
+        Removes jobs that are not successors of the rootJobWrapper.
+        
+        If jobCache is passed, it must be a dict from job ID to JobWrapper
+        object. Jobs will be loaded from the cache (which can be downloaded from
+        the jobStore in a batch) instead of piecemeal when recursed into.
         """
         # Iterate from the root jobWrapper and collate all jobs that are reachable from it
         # All other jobs returned by self.jobs() are orphaned and can be removed
         reachableFromRoot = set()
+
+        if jobCache is None:
+            logger.warning("Cleaning jobStore recursively.")
+
+        def getJob(jobId):
+            if jobCache is not None:
+                return jobCache[jobId]
+            else:
+                return self.load(jobId)
+                
+        def getJobs():
+            if jobCache is not None:
+                return jobCache.itervalues()
+            else:
+                return self.jobs()
 
         def getConnectedJobs(jobWrapper):
             if jobWrapper.jobStoreID in reachableFromRoot:
@@ -144,12 +163,12 @@ class AbstractJobStore(object):
                 for successorJobStoreID in map(lambda x: x[0], jobs):
                     if successorJobStoreID not in reachableFromRoot and self.exists(
                             successorJobStoreID):
-                        getConnectedJobs(self.load(successorJobStoreID))
+                        getConnectedJobs(getJob(successorJobStoreID))
 
         getConnectedJobs(rootJobWrapper)
 
         # Cleanup the state of each jobWrapper
-        for jobWrapper in self.jobs():
+        for jobWrapper in getJobs():
             changed = False  # Flag to indicate if we need to update the jobWrapper
             # on disk
 
