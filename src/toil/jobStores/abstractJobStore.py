@@ -144,12 +144,18 @@ class AbstractJobStore(object):
             logger.warning("Cleaning jobStore recursively.")
 
         def getJob(jobId):
-            if jobCache is not None and jobCache.has_key(jobId):
+            if jobCache is not None:
                 return jobCache[jobId]
             else:
-                if jobCache is not None:
-                    logger.warning("Cache miss for job %s" % jobId)
                 return self.load(jobId)
+                
+        def haveJob(jobId):
+            if jobCache is not None:
+                return jobCache.has_key(jobId)
+            else:
+                return self.exists(jobId)
+                
+        def have
                 
         def getJobs():
             if jobCache is not None:
@@ -161,12 +167,11 @@ class AbstractJobStore(object):
             if jobWrapper.jobStoreID in reachableFromRoot:
                 return
             reachableFromRoot.add(jobWrapper.jobStoreID)
-            if len(reachableFromRoot) % 100 == 0:
+            if len(reachableFromRoot) % 1000 == 0:
                 logger.info("%d jobs reachable from root..." % len(reachableFromRoot))
             for jobs in jobWrapper.stack:
                 for successorJobStoreID in map(lambda x: x[0], jobs):
-                    if successorJobStoreID not in reachableFromRoot and self.exists(
-                            successorJobStoreID):
+                    if successorJobStoreID not in reachableFromRoot and haveJob(successorJobStoreID):
                         getConnectedJobs(getJob(successorJobStoreID))
 
         logger.info("Checking job graph connectivity...")
