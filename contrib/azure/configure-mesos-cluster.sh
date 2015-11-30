@@ -264,7 +264,7 @@ fi
 if ismaster ; then
   quorum=`expr $MASTERCOUNT / 2 + 1`
   echo $quorum | sudo tee /etc/mesos-master/quorum
-  hostname -i | sudo tee /etc/mesos-master/ip
+  hostname -I | sed 's/ /\n/' | grep "^10." | sudo tee /etc/mesos-master/ip
   hostname | sudo tee /etc/mesos-master/hostname
   echo 'Mesos Cluster on Microsoft Azure' | sudo tee /etc/mesos-master/cluster
 fi
@@ -333,7 +333,7 @@ if isagent ; then
   fi
   # Our hostname may not resolve yet, so we look at our IPs and find the 10.
   # address instead
-  hostname -I | grep "^10." | sudo tee /etc/mesos-slave/ip
+  hostname -I | sed 's/ /\n/' | grep "^10." | sudo tee /etc/mesos-slave/ip
   hostname | sudo tee /etc/mesos-slave/hostname
   
   # Set up the Mesos salve work directory in the ephemeral /mnt
