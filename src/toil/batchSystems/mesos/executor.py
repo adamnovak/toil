@@ -49,6 +49,12 @@ class MesosExecutor(mesos.interface.Executor):
         self.workerCleanupInfo = None
         Resource.prepareSystem()
         self.address = None
+        # Holds the Mesos sandbox directory that all executor files should be
+        # in, which is communicated to us from Mesos by being the working
+        # directory on executor start. Note that according to
+        # <http://mesos.apache.org/documentation/latest/sandbox/> an executor
+        # should never create any files outside of its sandbox.
+        self.sandbox = None
 
     def registered(self, driver, executorInfo, frameworkInfo, slaveInfo):
         """
@@ -56,6 +62,8 @@ class MesosExecutor(mesos.interface.Executor):
         """
         log.info("Registered with framework")
         self.address = socket.gethostbyname(slaveInfo.hostname)
+        # Now we are running. Grab our sandbox directory.
+        self.sandbox = os.getcwd()
         nodeInfoThread = threading.Thread(target=self._sendFrameworkMessage, args=[driver])
         nodeInfoThread.daemon = True
         nodeInfoThread.start()
@@ -156,12 +164,18 @@ class MesosExecutor(mesos.interface.Executor):
 
             :rtype: subprocess.Popen
             """
+
+            # Construct the environment
+            # Set the work dir to be our sandbox
+            jobEnv = dict(os.environ, TOIL_WORKDIR=self.sandbox)
+            # Allow it to be overridden by the environment that the job brought
+            jobEnv = dict(jobEnv, **job.environment)
+
             if job.userScript:
                 job.userScript.register()
             log.debug("Invoking command: '%s'", job.command)
             with self.popenLock:
-                return subprocess.Popen(job.command,
-                                        shell=True, env=dict(os.environ, **job.environment))
+                return subprocess.Popen(job.command, shell=True, env=jobEnv)
 
         def sendUpdate(taskState, wallTime=None, message=''):
             log.debug('Sending task status update ...')

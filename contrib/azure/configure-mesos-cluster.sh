@@ -429,9 +429,6 @@ echo "Finished installing and configuring docker and swarm"
 
 if [ "$TOILENABLED" == "true" ] ; then
 
-  # Instruct Toil to use the ephemeral /mnt as its cache directory
-  echo "TOIL_WORKDIR=/mnt" | sudo tee -a /etc/environment
-
   # Upgrade Python to 2.7.latest
   sudo apt-add-repository -y ppa:fkrull/deadsnakes-python2.7
   sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
