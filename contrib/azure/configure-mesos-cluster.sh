@@ -77,6 +77,22 @@ else
   echo "no valid key data"
 fi
 
+
+############################
+# Configure Ephemeral Disks
+############################
+
+# Work around https://bugs.launchpad.net/ubuntu/+source/cloud-init/+bug/1603222
+# Otherwise your ephemeral disk won't get re-set-up on reboot
+sudo tee -a /etc/cloud/cloud.cfg <<EOF
+
+datasource:
+  Azure:
+    disk_aliases:
+      ephemeral0: /dev/disk/azure/resource
+
+EOF
+
 ###################
 # Common Functions
 ###################
@@ -412,6 +428,10 @@ echo "Finished installing and configuring docker and swarm"
 ###############################################
 
 if [ "$TOILENABLED" == "true" ] ; then
+
+  # Instruct Toil to use the ephemeral /mnt as its cache directory
+  echo "TOIL_WORKDIR=/mnt" | sudo tee -a /etc/environment
+
   # Upgrade Python to 2.7.latest
   sudo apt-add-repository -y ppa:fkrull/deadsnakes-python2.7
   sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
