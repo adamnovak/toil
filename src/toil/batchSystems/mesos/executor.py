@@ -164,12 +164,15 @@ class MesosExecutor(mesos.interface.Executor):
             """
 
 
-            # Allow it to be overridden by the environment that the job brought
-            jobEnv = dict(os.environ, **job.environment)
-
-            if not jobEnv.has_key("TOIL_WORKDIR"):
-                assert(self.sandbox != None)
-                jobEnv["TOIL_WORKDIR"] = self.sandbox
+            # Lowest priority: node local environment
+            jobEnv = dict(os.environ)
+            
+            # Next priority: override TOIL_WORKDIR with the sandbox
+            assert(self.sandbox != None)
+            jobEnv["TOIL_WORKDIR"] = self.sandbox
+            
+            # Highest priority: job environment info from the master
+            jobEnv.update(job.environment)
 
             if job.userScript:
                 job.userScript.register()
