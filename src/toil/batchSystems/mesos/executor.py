@@ -49,10 +49,6 @@ class MesosExecutor(mesos.interface.Executor):
         self.workerCleanupInfo = None
         Resource.prepareSystem()
         self.address = None
-        # Holds the Mesos sandbox directory that all executor files should be
-        # in, which is communicated to us from Mesos by being the working
-        # directory on executor start.
-        self.sandbox = None
 
     def registered(self, driver, executorInfo, frameworkInfo, slaveInfo):
         """
@@ -60,8 +56,6 @@ class MesosExecutor(mesos.interface.Executor):
         """
         log.info("Registered with framework")
         self.address = socket.gethostbyname(slaveInfo.hostname)
-        self.sandbox = os.getcwd()
-        log.info("Sandbox will be: %s", self.sandbox)
         nodeInfoThread = threading.Thread(target=self._sendFrameworkMessage, args=[driver])
         nodeInfoThread.daemon = True
         nodeInfoThread.start()
@@ -162,24 +156,12 @@ class MesosExecutor(mesos.interface.Executor):
 
             :rtype: subprocess.Popen
             """
-
-
-            # Lowest priority: node local environment
-            jobEnv = dict(os.environ)
-            
-            # Next priority: override TOIL_WORKDIR with the sandbox
-            assert(self.sandbox != None)
-            jobEnv["TOIL_WORKDIR"] = self.sandbox
-            
-            # Highest priority: job environment info from the master
-            jobEnv.update(job.environment)
-
             if job.userScript:
                 job.userScript.register()
-            log.debug("Invoking command: '%s' in workdir '%s'", job.command,
-                      jobEnv["TOIL_WORKDIR"])
+            log.debug("Invoking command: '%s'", job.command)
             with self.popenLock:
-                return subprocess.Popen(job.command, shell=True, env=jobEnv)
+                return subprocess.Popen(job.command,
+                                        shell=True, env=dict(os.environ, **job.environment))
 
         def sendUpdate(taskState, wallTime=None, message=''):
             log.debug('Sending task status update ...')
