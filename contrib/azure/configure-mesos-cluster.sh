@@ -357,7 +357,11 @@ if isagent ; then
   echo "preemptable:False" | sudo tee /etc/mesos-slave/attributes
 
   # Set up the Mesos salve work directory in the ephemeral /mnt
-  echo "/mnt" | sudo tee /etc/mesos-slave/work_dir
+  sudo mkdir -p /mnt/mesos
+  # Make sure it comes back on boot if the ephemeral drive gets clobbered
+  sudo sed -i -e '$i \mkdir -p /mnt/mesos\n' /etc/rc.local
+  # Tell Mesos about it
+  echo "/mnt/mesos" | sudo tee /etc/mesos-slave/work_dir
 
   # Add mesos-dns IP addresses at the top of resolv.conf
   RESOLV_TMP=resolv.conf.temp
@@ -432,6 +436,16 @@ echo "Finished installing and configuring docker and swarm"
 ###############################################
 
 if [ "$TOILENABLED" == "true" ] ; then
+
+  # Set up a temp directory for Toil to use on the same mountpoint as Mesos
+  sudo mkdir -p /mnt/toil
+  # Make sure its permissions let normal users create files
+  sudo chmod 1777 /mnt/toil
+  # Make sure it comes back on boot if the ephemeral drive gets clobbered
+  sudo sed -i -e '$i \mkdir -p /mnt/toil\n' /etc/rc.local
+  sudo sed -i -e '$i \chmod 1777 /mnt/toil\n' /etc/rc.local
+  # Tell Toil about it
+  echo "TOIL_WORKDIR=/mnt/toil" | sudo tee -a /etc/environment
 
   # Upgrade Python to 2.7.latest
   sudo apt-add-repository -y ppa:fkrull/deadsnakes-python2.7
