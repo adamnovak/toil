@@ -444,7 +444,8 @@ if [ "$TOILENABLED" == "true" ] ; then
   # Make sure it comes back on boot if the ephemeral drive gets clobbered
   sudo sed -i -e '$i \mkdir -p /mnt/toil\n' /etc/rc.local
   sudo sed -i -e '$i \chmod 1777 /mnt/toil\n' /etc/rc.local
-  # Tell Toil about it
+  # Tell Toil about it.
+  # TODO: This only seems to be respected if set on the Toil master node.
   echo "TOIL_WORKDIR=/mnt/toil" | sudo tee -a /etc/environment
 
   # Upgrade Python to 2.7.latest
