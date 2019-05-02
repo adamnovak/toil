@@ -732,7 +732,7 @@ class hidden(object):
             A = Job.wrapJobFn(self._forceModifyCacheLockFile, newTotalMB=1024, disk='1G')
             B = Job.wrapJobFn(self._doubleWriteFileToJobStore, fileMB=850, disk='900M')
             # Set it to > 2GB such that the cleanup jobs don't die.
-            C = Job.wrapJobFn(self._readFromJobStoreWithoutAssertions, fsID=B.rv(), disk='1G')
+            C = Job.wrapJobFn(self._readFromJobStoreAssertHarbinger, fsID=B.rv(), disk='1G')
             D = Job.wrapJobFn(self._forceModifyCacheLockFile, newTotalMB=5000, disk='1G')
             A.addChild(B)
             B.addChild(C)
@@ -742,8 +742,10 @@ class hidden(object):
         @staticmethod
         def _doubleWriteFileToJobStore(job, fileMB):
             """
-            Write a local file to job store, then write it again.  The second should trigger an
-            async write.
+            Write a local file to job store, then write it again.  The second
+            should trigger an async write. Assert that, then tamper with the
+            internals of the file store so harbinger file reading is slow, then
+            write the file again and return the ID.
 
             :param job: job
             :param fileMB: File Size
@@ -762,15 +764,18 @@ class hidden(object):
 
             job.fileStore.writeGlobalFile(testFile.name)
             fsID = job.fileStore.writeGlobalFile(testFile.name)
-            hidden.AbstractCachingFileStoreTest._readFromJobStoreWithoutAssertions(job, fsID)
+            # Now we hope that we can do this before the async write finishes.
+            # TODO: this is fundamentally a race condition
+            hidden.AbstractCachingFileStoreTest._readFromJobStoreAssertHarbinger(job, fsID)
             # Make this take longer so we can test asynchronous writes across jobs/workers.
             job.fileStore.HarbingerFile.read = newHarbingerFileRead
             return job.fileStore.writeGlobalFile(testFile.name)
 
         @staticmethod
-        def _readFromJobStoreWithoutAssertions(job, fsID):
+        def _readFromJobStoreAssertHarbinger(job, fsID):
             """
-            Reads a file from the job store.  That will be all, thank you.
+            Reads a file from the job store, after asserting that it is not
+            cached and that it is uploading or downloading.
 
             :param job: job
             :param fsID: Job store file ID for the read file

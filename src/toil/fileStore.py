@@ -583,15 +583,16 @@ class CachingFileStore(FileStore):
             jobSpecificFiles = list(self._CacheState._load(self.cacheStateFile).jobState[
                 self.jobID]['filesToFSIDs'].keys())
             # Saying nlink is 2 implicitly means we are using the job file store, and it is on
-            # the same device as the work dir.
+            # the same device as the work dir, and we can hardlink to symlinks.
             if self.nlinkThreshold == 2 and absLocalFileName not in jobSpecificFiles:
                 jobStoreFileID = self.jobStore.getEmptyFileStoreID(cleanupID)
                 # getEmptyFileStoreID creates the file in the scope of the job store hence we
                 # need to delete it before linking.
+                logger.debug('CACHE: Write file by link: \'%s\'.' % absLocalFileName)
                 os.remove(self.jobStore._getAbsPath(jobStoreFileID))
                 os.link(absLocalFileName, self.jobStore._getAbsPath(jobStoreFileID))
-            # If they're not on the file system, or if the file is already linked with an
-            # existing file, we need to copy to the job store.
+            # If we aren't hard linking in and out of the cache, we need to copy to the job store.
+            # TODO: We also might need to do this if the file already has other hard links.
             # Check if the user allows asynchronous file writes
             elif self.jobStore.config.useAsync:
                 jobStoreFileID = self.jobStore.getEmptyFileStoreID(cleanupID)
@@ -602,6 +603,7 @@ class CachingFileStore(FileStore):
                 # readGlobalFile in a subsequent job is called before the writing thread has
                 # received the message to write the file and has created the dummy harbinger
                 # (and the file was unable to be cached/was evicted from the cache).
+                logger.debug('CACHE: Write file asynchronously: \'%s\'.' % absLocalFileName)
                 harbingerFile = self.HarbingerFile(self, fileStoreID=jobStoreFileID)
                 harbingerFile.write()
                 fileHandle = open(absLocalFileName, 'rb')
@@ -613,7 +615,9 @@ class CachingFileStore(FileStore):
                 self.queue.put((fileHandle, jobStoreFileID))
             # Else write directly to the job store.
             else:
+                logger.debug('CACHE: Write file synchronously: \'%s\'.' % absLocalFileName)
                 jobStoreFileID = self.jobStore.writeFile(absLocalFileName, cleanupID)
+
             # Local files are cached by default, unless they were written from previously read
             # files.
             if absLocalFileName not in jobSpecificFiles:
@@ -1033,9 +1037,11 @@ class CachingFileStore(FileStore):
 
     def _fileIsCached(self, jobStoreFileID):
         """
-        Is the file identified by jobStoreFileID in cache or not.
+        Is the file identified by jobStoreFileID in cache or not?
         """
-        return os.path.exists(self.encodedFileID(jobStoreFileID))
+        cached = os.path.exists(self.encodedFileID(jobStoreFileID))
+        logger.debug('CACHE: Is file %s cached? %s' % (jobStoreFileID, str(cached)))
+        return cached
 
     def decodedFileID(self, cachedFilePath):
         """
@@ -1516,8 +1522,8 @@ class CachingFileStore(FileStore):
             self.harbingerFileName = '/.'.join(os.path.split(cachedFileName)) + '.harbinger'
 
         def write(self):
-            self.fileStore.logToMaster('CACHE: Creating a harbinger file for (%s). '
-                                       % self.fileStoreID, logging.DEBUG)
+            self.fileStore.logToMaster('CACHE: Creating a harbinger file for (%s): %s. '
+                                       % (self.fileStoreID, self.harbingerFileName), logging.DEBUG)
             with open(self.harbingerFileName + '.tmp', 'w') as harbingerFile:
                 harbingerFile.write(str(os.getpid()))
             # Make this File read only to prevent overwrites
@@ -1592,6 +1598,7 @@ class CachingFileStore(FileStore):
                     break
                 inputFileHandle, jobStoreFileID = args
                 cachedFileName = self.encodedFileID(jobStoreFileID)
+                logger.debug('CACHE: Processing async write of ID %s' % jobStoreFileID)
                 # Ensure that the harbinger exists in the cache directory and that the PID
                 # matches that of this writing thread.
                 # If asyncWrite is ported to subprocesses instead of threads in the future,
@@ -1610,6 +1617,7 @@ class CachingFileStore(FileStore):
                     self._pendingFileWrites.remove(jobStoreFileID)
                 # Remove the harbinger file
                 harbingerFile.delete()
+                logger.debug('CACHE: Completed async write of ID %s' % jobStoreFileID)
         except:
             self._terminateEvent.set()
             raise
