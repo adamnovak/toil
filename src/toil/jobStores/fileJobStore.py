@@ -373,7 +373,7 @@ class FileJobStore(AbstractJobStore):
 
         shutil.copyfile(localFilePath, jobStoreFilePath)
 
-    def readFile(self, jobStoreFileID, localFilePath, mutable=False, symlink=False):
+    def readFile(self, jobStoreFileID, localFilePath, mutable=False, symlink=True):
         # If mutable=False and symlink=True, we guarantee that, if we can
         # produce a hardlink, we will, even if the file being linked to is
         # itself a symlink. The CachingFileStore relies on this because it

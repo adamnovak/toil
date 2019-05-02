@@ -213,7 +213,7 @@ class FileStore(with_metaclass(ABCMeta, object)):
             yield wrappedStream, fileID
 
     @abstractmethod
-    def readGlobalFile(self, fileStoreID, userPath=None, cache=True, mutable=False, symlink=False):
+    def readGlobalFile(self, fileStoreID, userPath=None, cache=True, mutable=False, symlink=True):
         """
         Makes the file associated with fileStoreID available locally. If mutable is True,
         then a copy of the file will be created locally so that the original is not modified
@@ -632,7 +632,7 @@ class CachingFileStore(FileStore):
         # TODO: Make this work with caching
         return super(CachingFileStore, self).writeGlobalFileStream(cleanup)
 
-    def readGlobalFile(self, fileStoreID, userPath=None, cache=True, mutable=False, symlink=False):
+    def readGlobalFile(self, fileStoreID, userPath=None, cache=True, mutable=False, symlink=True):
         """
         Downloads a file described by fileStoreID from the file store to the local directory.
         The function first looks for the file in the cache and if found, it hardlinks to the
@@ -1766,7 +1766,7 @@ class NonCachingFileStore(FileStore):
         self.localFileMap[fileStoreID].append(absLocalFileName)
         return FileID.forPath(fileStoreID, absLocalFileName)
 
-    def readGlobalFile(self, fileStoreID, userPath=None, cache=True, mutable=False, symlink=False):
+    def readGlobalFile(self, fileStoreID, userPath=None, cache=True, mutable=False, symlink=True):
         if userPath is not None:
             localFilePath = self._resolveAbsoluteLocalPath(userPath)
             if os.path.exists(localFilePath):

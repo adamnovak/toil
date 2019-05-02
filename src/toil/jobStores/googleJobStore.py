@@ -258,7 +258,7 @@ class GoogleJobStore(AbstractJobStore):
         return fileID
 
     @googleRetry
-    def readFile(self, jobStoreFileID, localFilePath, mutable=False, symlink=False):
+    def readFile(self, jobStoreFileID, localFilePath, mutable=False, symlink=True):
         # used on non-shared files which will be encrypted if available
         # checking for JobStoreID existence
         if not self.fileExists(jobStoreFileID):
