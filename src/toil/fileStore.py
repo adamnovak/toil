@@ -33,6 +33,7 @@ import dill
 import errno
 import logging
 import os
+import platform
 import shutil
 import stat
 import tempfile
@@ -731,7 +732,7 @@ class CachingFileStore(FileStore):
                     try:
                         self.jobStore.readFile(fileStoreID,
                                                '/.'.join(os.path.split(cachedFileName)),
-                                               mutable=(system.platform() == 'Darwin'),
+                                               mutable=(platform.system() == 'Darwin'),
                                                symlink=True)
                     except:
                         if os.path.exists('/.'.join(os.path.split(cachedFileName))):
@@ -759,7 +760,7 @@ class CachingFileStore(FileStore):
                     # Do it exactly as we do for going into the cache, because
                     # we need to be able to predict if we got a copy or not.
                     self.jobStore.readFile(fileStoreID, localFilePath,
-                                           mutable=(system.platform() == 'Darwin'), symlink=True)
+                                           mutable=(platform.system() == 'Darwin'), symlink=True)
 
                     if (not symlink and os.path.islink(localFilePath)):
                         # We got a symlink when we don't want one.
@@ -1294,7 +1295,7 @@ class CachingFileStore(FileStore):
             # symlinks. If that changes, we will have to modify our behavior.
             cachedFile = os.path.join(tempCacheDir, 'sniffLinkCount') 
             self.jobStore.readFile(emptyID, cachedFile,
-                                   mutable=(system.platform() == 'Darwin'), symlink=True)
+                                   mutable=(platform.system() == 'Darwin'), symlink=True)
 
             # Check the link count
             self.nlinkThreshold = os.lstat(cachedFile).st_nlink
