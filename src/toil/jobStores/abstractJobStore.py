@@ -842,9 +842,9 @@ class AbstractJobStore(with_metaclass(ABCMeta, object)):
         raise NotImplementedError()
 
     @abstractmethod
-    def readFile(self, jobStoreFileID, localFilePath, symlink=False):
+    def readFile(self, jobStoreFileID, localFilePath, mutable=False, symlink=False):
         """
-        Copies or hard links the file referenced by jobStoreFileID to the given
+        Copies or links the file referenced by jobStoreFileID to the given
         local file path. The version will be consistent with the last copy of
         the file written/updated. If the file in the job store is later
         modified via updateFile or updateFileStream, it is
@@ -858,8 +858,16 @@ class AbstractJobStore(with_metaclass(ABCMeta, object)):
         :param str localFilePath: the local path indicating where to place the contents of the
                given file in the job store
 
+        :param bool mutable: whether the reader demands its own full (mutable) copy of the file.
+               If left as false, the job store may provide a hard link or symlink, or even a
+               hard link to a symlink on platforms that support them. If set to true, the job
+               store will provide a copy, with user write permissions enabled.
+
         :param bool symlink: whether the reader can tolerate a symlink. If set to true, the job
                store may create a symlink instead of a full copy of the file or a hard link.
+               If set to false, the job store may not provide a symlink, or a hard link to a
+               symlink (on platforms that support them). It will provide a hard link to a
+               normal file or a copy.
         """
         raise NotImplementedError()
 

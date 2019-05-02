@@ -225,9 +225,13 @@ class FileStore(with_metaclass(ABCMeta, object)):
 
         :param toil.fileStore.FileID fileStoreID: job store id for the file
         :param string userPath: a path to the name of file to which the global file will be copied
-               or hard-linked (see below).
-        :param bool cache: Described in :func:`toil.fileStore.CachingFileStore.readGlobalFile`
-        :param bool mutable: Described in :func:`toil.fileStore.CachingFileStore.readGlobalFile`
+               or linked (see below).
+        :param bool cache: Cache the read file in the FileStore, if possible. 
+        :param bool mutable: If True, caller will accept only a new writable normal file, not a
+               hardlink or symlink.
+        :param bool symlink: If False, caller will not accept a symlink or a hard link to a
+               symlink. Only a full copy or a hard link will be accepted. If True, caller will
+               accept a symlink or a hard link to a symlink.
         :return: An absolute path to a local, temporary copy of the file keyed by fileStoreID.
         :rtype: str
         """
@@ -442,8 +446,26 @@ class FileStore(with_metaclass(ABCMeta, object)):
 
 class CachingFileStore(FileStore):
     """
-    A cache-enabled file store that attempts to use hard-links and asynchronous job store writes to
-    reduce I/O between, and during jobs.
+    A cache-enabled file store that attempts to use hard-links and asynchronous
+    job store writes to reduce I/O between, and during jobs.
+
+    We maintain a cache, full of files. These files all have a consistent
+    hardlink count, which will be 1, unless it is 2 because the file is a hard
+    link to something whose canonical copy is a file held by the job store.
+    (Right now only the FileJobStore does this.) That link count then goes up
+    as links are given to jobs, whose local temp directories are necessarily on
+    the same filesystem as our cache. When it comes down again, we know the
+    files are safe to delete to free up space.
+
+    Sometimes the copy of a file held by the file store may be a symlink. On
+    Linux, we can hardlink to that symlink, and everything proceeds as normal.
+    On Mac, attempting to hardlink to a symlink just hardlinks to the original
+    file, which may be on another device or have other outstanding hardlinks,
+    which is incompatible with our link reference counting, which assumes that
+    if one file we read is a hard link, all of them are.
+    
+    So on Mac we never accept hardlinks or symlinks out of the file store, only
+    real copies, to avoid this situation.
     """
 
     def __init__(self, jobStore, jobGraph, localTempDir, inputBlockFn):
@@ -625,8 +647,15 @@ class CachingFileStore(FileStore):
                complete.
         :param bool mutable: If True, the file path returned points to a file that is
                modifiable by the user. Using False is recommended as it saves disk by making
-               multiple workers share a file via hard links. The default is False.
+               multiple workers share a file copy. The default is False.
+        :param bool symlink: If False, do not produce a symlink or a hardlink to one.
+               Make a copy or a hard link to a normal file instead.
         """
+
+        if mutable and symlink:
+            # We can't tolerate a symlink if we need a mutable copy
+            symlink = False
+
         # Check that the file hasn't been deleted by the user
         if fileStoreID in self.filesToDelete:
             raise RuntimeError('Trying to access a file in the jobStore you\'ve deleted: ' + \
@@ -656,6 +685,11 @@ class CachingFileStore(FileStore):
             if fileIsLocal and self._fileIsCached(fileStoreID):
                 logger.debug('CACHE: Cache hit on file with ID \'%s\'.' % fileStoreID)
                 assert not os.path.exists(localFilePath)
+                if os.path.islink(cachedFileName) and not symlink:
+                    # The cached file is (a hardlink to?) a symlink.
+                    # We aren't allowed to produce a hardlink to a symlink.
+                    # So make a copy instead.
+                    mutable = True
                 if mutable:
                     shutil.copyfile(cachedFileName, localFilePath)
                     cacheInfo = self._CacheState._load(self.cacheStateFile)
@@ -697,7 +731,8 @@ class CachingFileStore(FileStore):
                     try:
                         self.jobStore.readFile(fileStoreID,
                                                '/.'.join(os.path.split(cachedFileName)),
-                                               symlink=False)
+                                               mutable=(system.platform() == 'Darwin'),
+                                               symlink=True)
                     except:
                         if os.path.exists('/.'.join(os.path.split(cachedFileName))):
                             os.remove('/.'.join(os.path.split(cachedFileName)))
@@ -708,7 +743,7 @@ class CachingFileStore(FileStore):
                         if os.path.exists('/.'.join(os.path.split(cachedFileName))):
                             os.rename('/.'.join(os.path.split(cachedFileName)), cachedFileName)
                             # If this is not true we get into trouble in our internal reference counting.
-                            assert(os.stat(cachedFileName).st_nlink == self.nlinkThreshold)
+                            assert(os.lstat(cachedFileName).st_nlink == self.nlinkThreshold)
                             self.addToCache(localFilePath, fileStoreID, 'read', mutable)
                             # We don't need to return the file size here because addToCache
                             # already does it for us
@@ -716,29 +751,54 @@ class CachingFileStore(FileStore):
                         # In any case, delete the harbinger file.
                         harbingerFile.delete()
                 else:
+                    # We are not going to use the cache.
                     # Release the cache lock since the remaining stuff is not cache related.
                     flock(lockFileHandle, LOCK_UN)
-                    self.jobStore.readFile(fileStoreID, localFilePath, symlink=False)
-                    # Make sure we got a file with the number of links we expect.
-                    # If this is not true we get into trouble in our internal reference counting.
-                    assert(os.stat(localFilePath).st_nlink == self.nlinkThreshold)
-                    os.chmod(localFilePath, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
-                    # Now that we have the file, we have 2 options. It's modifiable or not.
-                    # Either way, we need to account for FileJobStore making links instead of
-                    # copies.
+
+                    # Just directly download the file.
+                    # Do it exactly as we do for going into the cache, because
+                    # we need to be able to predict if we got a copy or not.
+                    self.jobStore.readFile(fileStoreID, localFilePath,
+                                           mutable=(system.platform() == 'Darwin'), symlink=True)
+
+                    if (not symlink and os.path.islink(localFilePath)):
+                        # We got a symlink when we don't want one.
+                        # Resolve it by making a copy.
+                        # TODO: what if the .tmp filename is not available?
+                        shutil.copyfile(localFilePath, localFilePath + '.tmp')
+                        os.rename(localFilePath + '.tmp', localFilePath)
+
+                        # Say we are now mutable so we count the file's size
+                        mutable = True
+
+
                     if mutable:
-                        if self.nlinkThreshold == 2:
-                            # nlinkThreshold can only be 1 or 2 and it can only be 2 iff the
-                            # job store is FilejobStore, and the job store and local temp dir
-                            # are on the same device. An atomic rename removes the nlink on the
-                            # file handle linked from the job store.
+                        # We need a mutable copy.
+                        if self.nlinkThreshold == 2 and os.lstat(localFilePath).st_nlink == 2:
+                            # nlinkThreshold can only be 1 or 2 and it can only
+                            # be 2 iff we get hard links out of a FileJobStore
+                            # job store.
+                            #
+                            # The actual link count on the file will be 2
+                            # unless we already copied it to de-symlink it.
+                            #
+                            # An atomic rename removes the nlink on the file
+                            # handle linked from the job store.
+                            # TODO: what if the .tmp filename is not available?
                             shutil.copyfile(localFilePath, localFilePath + '.tmp')
                             os.rename(localFilePath + '.tmp', localFilePath)
                         self._JobState.updateJobSpecificFiles(self, fileStoreID, localFilePath,
                                                               -1, False)
-                    # If it was immutable
+                    
                     else:
+                        # Make it immutable
+                        # TODO: these read permissions may be too permissive. And what if it is an executable?
+                        os.chmod(localFilePath, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+
+                        # We don't care about having a mutable copy.
                         if self.nlinkThreshold == 2:
+                            # We know we got a hard link out of the job store.
+                            # So don't count this file as using space.
                             self._accountForNlinkEquals2(localFilePath)
                         self._JobState.updateJobSpecificFiles(self, fileStoreID, localFilePath,
                                                               0.0, False)
@@ -811,7 +871,7 @@ class CachingFileStore(FileStore):
                 # at the moment.
                 if not os.path.exists(fileToDelete):
                     raise IllegalDeletionCacheError(fileToDelete)
-                fileStats = os.stat(fileToDelete)
+                fileStats = os.lstat(fileToDelete)
                 if fileSize != fileStats.st_size:
                     logger.warn("the size on record differed from the real size by " +
                                 "%s bytes" % str(fileSize - fileStats.st_size))
@@ -831,7 +891,7 @@ class CachingFileStore(FileStore):
                 # don't remove it from cache.
                 if self._fileIsCached(fileStoreID):
                     cachedFile = self.encodedFileID(fileStoreID)
-                    jobsUsingFile = os.stat(cachedFile).st_nlink
+                    jobsUsingFile = os.lstat(cachedFile).st_nlink
                     if not cacheInfo.isBalanced() and jobsUsingFile == self.nlinkThreshold:
                         os.remove(cachedFile)
                         cacheInfo.cached -= fileSize
@@ -919,7 +979,7 @@ class CachingFileStore(FileStore):
                     allCachedFiles = [os.path.join(self.localCacheDir, x)
                                       for x in os.listdir(self.localCacheDir)
                                       if not self._isHidden(x)]
-                    cacheInfo.cached = sum([os.stat(cachedFile).st_size
+                    cacheInfo.cached = sum([os.lstat(cachedFile).st_size
                                             for cachedFile in allCachedFiles])
                     # TODO: Delete the working directories
                 cacheInfo.sigmaJob = 0
@@ -1011,8 +1071,8 @@ class CachingFileStore(FileStore):
         with self.cacheLock() as lockFileHandle:
             cachedFile = self.encodedFileID(jobStoreFileID)
             # The file to be cached MUST originate in the environment of the TOIL temp directory
-            if (os.stat(self.localCacheDir).st_dev !=
-                    os.stat(os.path.dirname(localFilePath)).st_dev):
+            if (os.lstat(self.localCacheDir).st_dev !=
+                    os.lstat(os.path.dirname(localFilePath)).st_dev):
                 raise InvalidSourceCacheError('Attempting to cache a file across file systems '
                                               'cachedir = %s, file = %s.' % (self.localCacheDir,
                                                                              localFilePath))
@@ -1021,7 +1081,7 @@ class CachingFileStore(FileStore):
                                               '%s.' % localFilePath)
             if callingFunc == 'read' and mutable:
                 shutil.copyfile(cachedFile, localFilePath)
-                fileSize = os.stat(cachedFile).st_size
+                fileSize = os.lstat(cachedFile).st_size
                 cacheInfo = self._CacheState._load(self.cacheStateFile)
                 cacheInfo.cached += fileSize if cacheInfo.nlink != 2 else 0
                 if not cacheInfo.isBalanced():
@@ -1063,9 +1123,8 @@ class CachingFileStore(FileStore):
                     # Chmod the cached file. Cached files can never be modified.
                     os.chmod(cachedFile, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
                     # Return the filesize of cachedFile to the job and increase the cached size
-                    # The values passed here don't matter since rFS looks at the file only for
-                    # the stat
-                    self.returnFileSize(jobStoreFileID, localFilePath, lockFileHandle,
+                    # Operate on dest in case src was an input symlink we followed.
+                    self.returnFileSize(jobStoreFileID, dest, lockFileHandle,
                                         fileAlreadyCached=False)
                 if callingFunc == 'read':
                     logger.debug('CACHE: Read file with ID \'%s\' from the cache.' %
@@ -1088,7 +1147,7 @@ class CachingFileStore(FileStore):
         :param bool fileAlreadyCached: A flag to indicate whether the file was already cached or
                not. If it was, then it means that you don't need to add the filesize to cache again.
         """
-        fileSize = os.stat(cachedFileSource).st_size
+        fileSize = os.lstat(cachedFileSource).st_size
         cacheInfo = self._CacheState._load(self.cacheStateFile)
         # If the file isn't cached, add the size of the file to the cache pool. However, if the
         # nlink threshold is not 1 -  i.e. it is 2 (it can only be 1 or 2), then don't do this
@@ -1151,7 +1210,7 @@ class CachingFileStore(FileStore):
             allCacheFiles = [os.path.join(self.localCacheDir, x)
                              for x in os.listdir(self.localCacheDir)
                              if not self._isHidden(x)]
-            allCacheFiles = [(path, os.stat(path)) for path in allCacheFiles]
+            allCacheFiles = [(path, os.lstat(path)) for path in allCacheFiles]
             # TODO mtime vs ctime
             deletableCacheFiles = {(path, inode.st_mtime, inode.st_size)
                                    for path, inode in allCacheFiles
@@ -1189,7 +1248,7 @@ class CachingFileStore(FileStore):
         """
         with self._CacheState.open(self) as cacheInfo:
             cachedFile = self.encodedFileID(fileStoreID)
-            cachedFileStats = os.stat(cachedFile)
+            cachedFileStats = os.lstat(cachedFile)
             # We know the file exists because this function was called in the if block.  So we
             # have to ensure nothing has changed since then.
             assert cachedFileStats.st_nlink <= self.nlinkThreshold, \
@@ -1225,11 +1284,20 @@ class CachingFileStore(FileStore):
             # Read it out.
             # We have exclusive ownership of tempCacheDir at this point, so we
             # can just write any name in there.
+            #
+            # On Mac, we always make a copy, because the file job store may
+            # have an un-hard-linkable symlink to another device in it.
+            #
+            # TODO: On other platforms, we accept hard links and symlinks, with
+            # the understanding that only the FileJobStore actually produces
+            # hard links right now, and that it produces them in preference to
+            # symlinks. If that changes, we will have to modify our behavior.
             cachedFile = os.path.join(tempCacheDir, 'sniffLinkCount') 
-            self.jobStore.readFile(emptyID, cachedFile, symlink=False)
+            self.jobStore.readFile(emptyID, cachedFile,
+                                   mutable=(system.platform() == 'Darwin'), symlink=True)
 
             # Check the link count
-            self.nlinkThreshold = os.stat(cachedFile).st_nlink
+            self.nlinkThreshold = os.lstat(cachedFile).st_nlink
 
             # Only 1 or 2 is allowed.
             assert(self.nlinkThreshold == 1 or self.nlinkThreshold == 2)
@@ -1250,7 +1318,7 @@ class CachingFileStore(FileStore):
 
         :param str localFilePath: Path to the local file that was linked to the file store copy.
         """
-        fileStats = os.stat(localFilePath)
+        fileStats = os.lstat(localFilePath)
         assert fileStats.st_nlink >= self.nlinkThreshold
         with self._CacheState.open(self) as cacheInfo:
             cacheInfo.sigmaJob -= fileStats.st_size
@@ -1706,7 +1774,7 @@ class NonCachingFileStore(FileStore):
         else:
             localFilePath = self.getLocalTempFileName()
 
-        self.jobStore.readFile(fileStoreID, localFilePath, symlink=symlink)
+        self.jobStore.readFile(fileStoreID, localFilePath, mutable=mutable, symlink=symlink)
         self.localFileMap[fileStoreID].append(localFilePath)
         return localFilePath
 

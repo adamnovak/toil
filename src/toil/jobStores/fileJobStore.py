@@ -373,24 +373,82 @@ class FileJobStore(AbstractJobStore):
 
         shutil.copyfile(localFilePath, jobStoreFilePath)
 
-    def readFile(self, jobStoreFileID, localFilePath, symlink=False):
+    def readFile(self, jobStoreFileID, localFilePath, mutable=False, symlink=False):
+        # If mutable=False and symlink=True, we guarantee that, if we can
+        # produce a hardlink, we will, even if the file being linked to is
+        # itself a symlink. The CachingFileStore relies on this because it
+        # wants to ref count files by hardlink count, and it needs us to be
+        # consistent with the link counts of the files we give it, whether we
+        # internally have symlinks or real files.
         self._checkJobStoreFileID(jobStoreFileID)
         jobStoreFilePath = self._getAbsPath(jobStoreFileID)
         localDirPath = os.path.dirname(localFilePath)
 
-        if not symlink and os.path.islink(localFilePath):
-            # We had a symlink and want to clobber it with a hardlink or copy.
+        if mutable and symlink:
+            # Don't provide a symlink if we need a mutable copy
+            symlink = False
+
+        if os.path.islink(localFilePath):
+            # Clear out existing symlinks. Maybe we can hard link instead.
             os.unlink(localFilePath)
 
         if os.path.exists(localFilePath) and os.path.samefile(jobStoreFilePath, localFilePath):
-            # The files are already the same: same name, hardlinked, or
-            # symlinked. There is nothing to do, and trying to shutil.copyfile
-            # one over the other will fail.
-            return
+            # The files are already the same: same name or hardlinked.
+            if mutable:
+                if os.path.abspath(jobStoreFilePath) == os.path.abspath(localFilePath):
+                    # They are the same filename, and thus already mutable.
+                    return
+                else:
+                    # If they aren't already the same filename, we need to
+                    # unlink and copy to get a mutable version.
+                    os.unlink(localFilePath)
+            else:
+                # We don't need a mutable version, and we have a hard link already.
+                return
 
+        if not mutable:
+            # It is possible that we can hard link the file.
+            # Note that even if the device numbers match, we can end up trying
+            # to create a "cross-device" link.
+            #
+            # We don't pre-check the devices because we'd need different tests
+            # depending on whether the link target is a symlink and whether the
+            # OS allows harlinks to symlinks.
+
+            try:
+                if os.path.exists(localFilePath):
+                    try:
+                        # Delete the file if it exists already
+                        os.unlink(localFilePath)
+                    except:
+                        pass
+
+                # Try to hardlink
+                os.link(jobStoreFilePath, localFilePath)
+                # It worked!
+
+                if (not symlink and os.path.islink(localFilePath)):
+                    # We ended up with a symlink. We must be on a platform
+                    # where hardlink-to-symlink is supported and we had a
+                    # symlinked-in imported file. But the caller doesn't want
+                    # a symlink. So get rid of it and proceed to the copy case.
+                    os.unlink(localFilePath)
+                else:
+                    return
+            except OSError as e:
+                if e.errno == errno.EXDEV:
+                    # It's a cross-device link even though it didn't appear to be.
+                    # Just keep going and hit the file copy case.
+                    pass
+                else:
+                    logger.critical('Unexpected OSError when reading file from job store')
+                    logger.critical('jobStoreFilePath: ' + jobStoreFilePath + ' ' + str(os.path.exists(jobStoreFilePath)))
+                    logger.critical('localFilePath: ' + localFilePath + ' ' + str(os.path.exists(localFilePath)))
+                    raise
+
+        # If we get here, we could not hard link
         if symlink:
-            # If the reader will accept a symlink, so always give them one.
-            # There's less that can go wrong.
+            # If the reader will accept a symlink, give them one.
             try:
                 os.symlink(jobStoreFilePath, localFilePath)
                 # It worked!
@@ -408,39 +466,10 @@ class FileJobStore(AbstractJobStore):
                 else:
                     raise
 
-        # If we get here, symlinking isn't an option.
-        if os.stat(jobStoreFilePath).st_dev == os.stat(localDirPath).st_dev:
-            # It is possible that we can hard link the file.
-            # Note that even if the device numbers match, we can end up trying
-            # to create a "cross-device" link.
-
-            try:
-                os.link(jobStoreFilePath, localFilePath)
-                # It worked!
-                return
-            except OSError as e:
-                if e.errno == errno.EEXIST:
-                    # Overwrite existing file, emulating shutil.copyfile().
-                    os.unlink(localFilePath)
-                    # It would be very unlikely to fail again for same reason but possible
-                    # nonetheless in which case we should just give up.
-                    os.link(jobStoreFilePath, localFilePath)
-
-                    # Now we succeeded and don't need to copy
-                    return
-                elif e.errno == errno.EXDEV:
-                    # It's a cross-device link even though it didn't appear to be.
-                    # Just keep going and hit the file copy case.
-                    pass
-                else:
-                    logger.critical('Unexpected OSError when reading file from job store')
-                    logger.critical('jobStoreFilePath: ' + jobStoreFilePath + ' ' + str(os.path.exists(jobStoreFilePath)))
-                    logger.critical('localFilePath: ' + localFilePath + ' ' + str(os.path.exists(localFilePath)))
-                    raise
-
         # If we get here, neither a symlink nor a hardlink will work.
         # Make a complete copy.
         shutil.copyfile(jobStoreFilePath, localFilePath)
+        # copyfile does not copy permission bits, so we know the file is writable
 
     def deleteFile(self, jobStoreFileID):
         if not self.fileExists(jobStoreFileID):
