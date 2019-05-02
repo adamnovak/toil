@@ -618,8 +618,10 @@ class CachingFileStore(FileStore):
                 logger.debug('CACHE: Write file synchronously: \'%s\'.' % absLocalFileName)
                 jobStoreFileID = self.jobStore.writeFile(absLocalFileName, cleanupID)
 
-            # Local files are cached by default, unless they were written from previously read
-            # files.
+            # Local files are cached by default, unless they were written from
+            # previously read files. Note that this allows a file to be cached
+            # *and* have a harbinger file at the same time, if doing an
+            # asynchronous write!
             if absLocalFileName not in jobSpecificFiles:
                 self.addToCache(absLocalFileName, jobStoreFileID, 'write')
             else:

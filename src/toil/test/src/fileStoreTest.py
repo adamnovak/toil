@@ -732,7 +732,7 @@ class hidden(object):
             A = Job.wrapJobFn(self._forceModifyCacheLockFile, newTotalMB=1024, disk='1G')
             B = Job.wrapJobFn(self._doubleWriteFileToJobStore, fileMB=850, disk='900M')
             # Set it to > 2GB such that the cleanup jobs don't die.
-            C = Job.wrapJobFn(self._readFromJobStoreAssertHarbinger, fsID=B.rv(), disk='1G')
+            C = Job.wrapJobFn(self._readFromJobStoreAssertAsyncUpload, fsID=B.rv(), disk='1G')
             D = Job.wrapJobFn(self._forceModifyCacheLockFile, newTotalMB=5000, disk='1G')
             A.addChild(B)
             B.addChild(C)
@@ -766,22 +766,23 @@ class hidden(object):
             fsID = job.fileStore.writeGlobalFile(testFile.name)
             # Now we hope that we can do this before the async write finishes.
             # TODO: this is fundamentally a race condition
-            hidden.AbstractCachingFileStoreTest._readFromJobStoreAssertHarbinger(job, fsID)
+            hidden.AbstractCachingFileStoreTest._readFromJobStoreAssertAsyncUpload(job, fsID)
             # Make this take longer so we can test asynchronous writes across jobs/workers.
             job.fileStore.HarbingerFile.read = newHarbingerFileRead
             return job.fileStore.writeGlobalFile(testFile.name)
 
         @staticmethod
-        def _readFromJobStoreAssertHarbinger(job, fsID):
+        def _readFromJobStoreAssertAsyncUpload(job, fsID):
             """
-            Reads a file from the job store, after asserting that it is not
-            cached and that it is uploading or downloading.
+            Reads a file from the job store, after asserting that it has a
+            harbinger file, indicating an ongoing upload or download.
 
             :param job: job
             :param fsID: Job store file ID for the read file
             :return: None
             """
             job.fileStore.logToMaster('Reading the written file')
+            # An asynchronous write will cache the file immediately
             assert not job.fileStore._fileIsCached(fsID)
             assert job.fileStore.HarbingerFile(job.fileStore, fileStoreID=fsID).exists()
             job.fileStore.readGlobalFile(fsID)
