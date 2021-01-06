@@ -91,7 +91,7 @@ class Node(object):
 
     def injectFile(self, fromFile, toFile, role):
         """
-        rysnc a file to the vm with the given role
+        rysnc a file to the container with the given role
         """
         maxRetries = 10
         for retry in range(maxRetries):
@@ -102,6 +102,20 @@ class Node(object):
                 logger.debug("Rsync to new node failed, trying again. Error message: %s" % e)
                 time.sleep(10 * retry)
         raise RuntimeError("Failed to inject file %s to %s with ip %s" % (fromFile, role, self.effectiveIP))
+        
+    def extractFile(self, fromFile, toFile, role):
+        """
+        rysnc a file from the container with the given role
+        """
+        maxRetries = 10
+        for retry in range(maxRetries):
+            try:
+                self.coreRsync([":" + fromFile, toFile], applianceName=role)
+                return True
+            except Exception as e:
+                logger.debug("Rsync from new node failed, trying again. Error message: %s" % e)
+                time.sleep(10 * retry)
+        raise RuntimeError("Failed to extract file %s from %s with ip %s" % (fromFile, role, self.effectiveIP))
 
     def _waitForSSHKeys(self, keyName='core'):
         # the propagation of public ssh keys vs. opening the SSH port is racey, so this method blocks until
@@ -173,7 +187,7 @@ class Node(object):
         :return: the number of unsuccessful attempts to connect to the port before a the first
         success
         """
-        logger.debug('Waiting for ssh port to open...')
+        logger.debug('Waiting for ssh port on %s to open...', self.effectiveIP)
         for i in count():
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:

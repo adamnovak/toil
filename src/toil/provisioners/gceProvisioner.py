@@ -40,8 +40,11 @@ class GCEProvisioner(AbstractProvisioner):
     NODE_BOTO_PATH = "/root/.boto" # boto file path on instances
     SOURCE_IMAGE = (b'projects/flatcar-cloud/global/images/family/flatcar-stable')
 
-    def __init__(self, clusterName, zone, nodeStorage, nodeStorageOverrides, sseKey):
-        super(GCEProvisioner, self).__init__(clusterName, zone, nodeStorage, nodeStorageOverrides)
+    def __init__(self, clusterName, clusterType, zone, nodeStorage, nodeStorageOverrides, sseKey):
+        if clusterType != 'mesos':
+            # We only support Mesos clusters.
+            raise ClusterTypeNotSupportedException(GCEProvisioner, clusterType)
+        super(GCEProvisioner, self).__init__(clusterName, clusterType, zone, nodeStorage, nodeStorageOverrides)
         self.cloud = 'gce'
         self._sseKey = sseKey
 
@@ -79,13 +82,14 @@ class GCEProvisioner(AbstractProvisioner):
         leader = self.getLeader()
         self._leaderPrivateIP = leader.privateIP
 
-        # generate a public key for the leader, which is used to talk to workers
-        self._masterPublicKey = self._setSSH()
-
         # The location of the Google credentials file on instances.
         self._credentialsPath = GoogleJobStore.nodeServiceAccountJson
         self._keyName = 'core' # key name leader users to communicate with works
         self._botoPath = self.NODE_BOTO_PATH # boto credentials (used if reading an AWS bucket)
+        
+        # Let the base provisioner work out how to deploy duly authorized
+        # workers for this leader.
+        self._setLeaderWorkerAuthentication()
 
     def _readCredentials(self):
         """
@@ -104,7 +108,7 @@ class GCEProvisioner(AbstractProvisioner):
         self._projectId = self.googleConnectionParams['project_id']
         self._clientEmail = self.googleConnectionParams['client_email']
         self._credentialsPath = self._googleJson
-        self._masterPublicKey = None
+        self._clearLeaderWorkerAuthentication() # TODO: Why are we doing this?
         self._gceDriver = self._getDriver()
 
 
@@ -167,8 +171,11 @@ class GCEProvisioner(AbstractProvisioner):
         leaderNode.injectFile(self._credentialsPath, GoogleJobStore.nodeServiceAccountJson, 'toil_leader')
         if self._botoPath:
             leaderNode.injectFile(self._botoPath, self.NODE_BOTO_PATH, 'toil_leader')
+        # Download credentials
+        self._setLeaderWorkerAuthentication(leaderNode)
+        
         logger.debug('Launched leader')
-
+        
     def getNodeShape(self, nodeType, preemptable=False):
         # TODO: read this value only once
         sizes = self._gceDriver.list_sizes(location=self._zone)
@@ -240,7 +247,7 @@ class GCEProvisioner(AbstractProvisioner):
             logger.debug('Launching %s preemptable nodes', numNodes)
 
         #kwargs["subnet_id"] = self.subnetID if self.subnetID else self._getClusterInstance(self.instanceMetaData).subnet_id
-        userData =  self._getCloudConfigUserData('worker', self._masterPublicKey, keyPath, preemptable)
+        userData =  self._getCloudConfigUserData('worker', keyPath, preemptable)
         metadata = {'items': [{'key': 'user-data', 'value': userData}]}
         imageType = 'flatcar-stable'
         sa_scopes = [{'scopes': ['compute', 'storage-full']}]

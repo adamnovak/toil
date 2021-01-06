@@ -23,6 +23,7 @@ from uuid import uuid4
 import pytest
 
 from toil.provisioners import cluster_factory
+from toil.provisioners.aws import get_current_aws_zone
 from toil.provisioners.aws.awsProvisioner import AWSProvisioner
 from toil.test import (ToilTest,
                        integrative,
@@ -41,7 +42,7 @@ class AWSProvisionerBenchTest(ToilTest):
     
     def testAMIFinding(self):
         for zone in ['us-west-2a', 'eu-central-1a', 'sa-east-1b']:
-            provisioner = AWSProvisioner('fakename', zone, 10000, None, None)
+            provisioner = AWSProvisioner('fakename', 'mesos', zone, 10000, None, None)
             ami = provisioner._discoverAMI()
             # Make sure we got an AMI and it looks plausible
             assert(ami.startswith('ami-'))
@@ -59,17 +60,32 @@ class AbstractAWSAutoscaleTest(ToilTest):
         self.numWorkers = ['2']
         self.numSamples = 2
         self.spotBid = 0.15
+        self.zone = get_current_aws_zone()
+        assert self.zone is not None, "Could not determine AWS availability zone to test in; is TOIL_AWS_ZONE set?"
+        self.scriptDir = '/tmp/t/'
+
+    def destroyCluster(self):
+        """
+        Destroy the cluster we built, if it exists.
+        
+        Succeeds if the cluster does not currently exist.
+        """
+        subprocess.check_call(['toil', 'destroy-cluster', '-p=aws', '-z', self.zone, self.clusterName])
 
     def setUp(self):
         super(AbstractAWSAutoscaleTest, self).setUp()
+        # Make sure that destroy works before we create any clusters.
+        # If this fails, no tests will run.
+        self.destroyCluster()
 
     def tearDown(self):
+        # Note that teardown will run even if the test crashes.
         super(AbstractAWSAutoscaleTest, self).tearDown()
-        subprocess.check_call(['toil', 'destroy-cluster', '-p=aws', self.clusterName])
+        self.destroyCluster()
         subprocess.check_call(['toil', 'clean', self.jobStore])
 
     def sshUtil(self, command):
-        cmd = ['toil', 'ssh-cluster', '--insecure', '-p=aws', self.clusterName] + command
+        cmd = ['toil', 'ssh-cluster', '--insecure', '-p=aws', '-z', self.zone, self.clusterName] + command
         log.debug("Running %s.", str(cmd))
         p = subprocess.Popen(cmd, stderr=-1, stdout=-1)
         o, e = p.communicate()
@@ -77,15 +93,18 @@ class AbstractAWSAutoscaleTest(ToilTest):
         log.debug('\n\nSTDERR: ' + e.decode("utf-8"))
 
     def rsyncUtil(self, src, dest):
-        subprocess.check_call(['toil', 'rsync-cluster', '--insecure', '-p=aws', self.clusterName] + [src, dest])
+        subprocess.check_call(['toil', 'rsync-cluster', '--insecure', '-p=aws', '-z', self.zone, self.clusterName] + [src, dest])
 
     def createClusterUtil(self, args=None):
         args = [] if args is None else args
-        subprocess.check_call(['toil', 'launch-cluster', '-p=aws', '-z=us-west-2a', f'--keyPairName={self.keyName}',
+        
+        # Try creating the cluster
+        subprocess.check_call(['toil', 'launch-cluster', '-p=aws', '-z', self.zone, f'--keyPairName={self.keyName}',
                                '--leaderNodeType=t2.medium', self.clusterName] + args)
+        # If we fail, tearDown will destroy the cluster.
 
     def getMatchingRoles(self):
-        return list(self.cluster._ctx.local_roles())
+        return list(self.cluster._boto2.local_roles())
 
     def launchCluster(self):
         self.createClusterUtil()
@@ -121,7 +140,7 @@ class AbstractAWSAutoscaleTest(ToilTest):
         self.launchCluster()
         # get the leader so we know the IP address - we don't need to wait since create cluster
         # already insures the leader is running
-        self.cluster = cluster_factory(provisioner='aws', clusterName=self.clusterName)
+        self.cluster = cluster_factory(provisioner='aws', zone=self.zone, clusterName=self.clusterName)
         self.leader = self.cluster.getLeader()
         self.sshUtil(['mkdir', '-p', self.scriptDir])  # hot deploy doesn't seem permitted to work in normal /tmp or /home
 
@@ -136,17 +155,14 @@ class AbstractAWSAutoscaleTest(ToilTest):
         self._getScript()
 
         toilOptions = [self.jobStore,
-                       '--batchSystem=mesos',
                        '--workDir=/var/lib/toil',
                        '--clean=always',
                        '--retryCount=2',
                        '--clusterStats=/tmp/t/',
                        '--logDebug',
-                       '--logFile=/tmp/t/sort.log',
-                       '--provisioner=aws']
-
-        toilOptions.extend(['--nodeTypes=' + ",".join(self.instanceTypes),
-                            '--maxNodes=' + ",".join(self.numWorkers)])
+                       '--logFile=/tmp/t/sort.log'
+                       ]
+        
         if preemptableJobs:
             toilOptions.extend(['--defaultPreemptable'])
 
@@ -165,7 +181,7 @@ class AbstractAWSAutoscaleTest(ToilTest):
             # https://github.com/BD2KGenomics/toil/issues/1567
             # retry this for up to 1 minute until the volume disappears
             try:
-                self.cluster._ctx.ec2.get_all_volumes(volume_ids=[volumeID])
+                self.cluster._boto2.ec2.get_all_volumes(volume_ids=[volumeID])
                 time.sleep(10)
             except EC2ResponseError as e:
                 if e.status == 400 and 'InvalidVolume.NotFound' in e.code:
@@ -200,6 +216,9 @@ class AWSAutoscaleTest(AbstractAWSAutoscaleTest):
         os.unlink(fileToSort)
 
     def _runScript(self, toilOptions):
+        toilOptions.extend(['--provisioner=aws', '--batchSystem=mesos',
+                            '--nodeTypes=' + ",".join(self.instanceTypes),
+                            '--maxNodes=' + ",".join(self.numWorkers)])
         runCommand = ['/home/venv/bin/python', '/home/sort.py', '--fileToSort=/home/sortFile', '--sseKey=/home/sortFile']
         runCommand.extend(toilOptions)
         self.sshUtil(runCommand)
@@ -215,7 +234,7 @@ class AWSAutoscaleTest(AbstractAWSAutoscaleTest):
         :return: volumeID
         """
         volumeID = super(AWSAutoscaleTest, self).getRootVolID()
-        rootVolume = self.cluster._ctx.ec2.get_all_volumes(volume_ids=[volumeID])[0]
+        rootVolume = self.cluster._boto2.ec2.get_all_volumes(volume_ids=[volumeID])[0]
         # test that the leader is given adequate storage
         self.assertGreaterEqual(rootVolume.size, self.requestedLeaderStorage)
         return volumeID
@@ -248,9 +267,11 @@ class AWSStaticAutoscaleTest(AWSAutoscaleTest):
 
         from toil.lib.ec2 import wait_instances_running
         self.createClusterUtil(args=['--leaderStorage', str(self.requestedLeaderStorage),
-                                     '--nodeTypes', ",".join(self.instanceTypes), '-w', ",".join(self.numWorkers), '--nodeStorage', str(self.requestedLeaderStorage)])
+                                     '--nodeTypes', ",".join(self.instanceTypes),
+                                     '-w', ",".join(self.numWorkers),
+                                     '--nodeStorage', str(self.requestedLeaderStorage)])
 
-        self.cluster = cluster_factory(provisioner='aws', clusterName=self.clusterName)
+        self.cluster = cluster_factory(provisioner='aws', zone=self.zone, clusterName=self.clusterName)
         nodes = self.cluster._getNodesInCluster(both=True)
         nodes.sort(key=lambda x: x.launch_time)
         # assuming that leader is first
@@ -260,16 +281,48 @@ class AWSStaticAutoscaleTest(AWSAutoscaleTest):
         # test that workers have expected storage size
         # just use the first worker
         worker = workers[0]
-        worker = next(wait_instances_running(self.cluster._ctx.ec2, [worker]))
+        worker = next(wait_instances_running(self.cluster._boto2.ec2, [worker]))
         rootBlockDevice = worker.block_device_mapping["/dev/xvda"]
         self.assertTrue(isinstance(rootBlockDevice, BlockDeviceType))
-        rootVolume = self.cluster._ctx.ec2.get_all_volumes(volume_ids=[rootBlockDevice.volume_id])[0]
+        rootVolume = self.cluster._boto2.ec2.get_all_volumes(volume_ids=[rootBlockDevice.volume_id])[0]
         self.assertGreaterEqual(rootVolume.size, self.requestedNodeStorage)
 
     def _runScript(self, toilOptions):
+        # Autoscale even though we have static nodes
+        toilOptions.extend(['--provisioner=aws', '--batchSystem=mesos',
+                            '--nodeTypes=' + ",".join(self.instanceTypes),
+                            '--maxNodes=' + ",".join(self.numWorkers)])
         runCommand = ['/home/venv/bin/python', '/home/sort.py', '--fileToSort=/home/sortFile']
         runCommand.extend(toilOptions)
         self.sshUtil(runCommand)
+        
+@integrative
+@pytest.mark.timeout(1200)
+class AWSManagedAutoscaleTest(AWSAutoscaleTest):
+    """Runs the tests on a self-scaling Kubernetes cluster."""
+    def __init__(self, name):
+        super().__init__(name)
+        self.requestedNodeStorage = 20
+
+    def launchCluster(self):
+        from boto.ec2.blockdevicemapping import BlockDeviceType
+
+        from toil.lib.ec2 import wait_instances_running
+        self.createClusterUtil(args=['--leaderStorage', str(self.requestedLeaderStorage),
+                                     '--nodeTypes', ",".join(self.instanceTypes),
+                                     '--managedWorkers', ",".join(self.numWorkers),
+                                     '--nodeStorage', str(self.requestedLeaderStorage),
+                                     '--clusterType', 'kubernetes'])
+
+        self.cluster = cluster_factory(provisioner='aws', zone=self.zone, clusterName=self.clusterName)
+
+    def _runScript(self, toilOptions):
+        # Don't use the provisioner, and use Kubernetes instead of Mesos
+        toilOptions.extend(['--batchSystem=kubernetes'])
+        runCommand = ['/home/venv/bin/python', '/home/sort.py', '--fileToSort=/home/sortFile']
+        runCommand.extend(toilOptions)
+        self.sshUtil(runCommand)
+
 
 
 @integrative
@@ -295,6 +348,9 @@ class AWSAutoscaleTestMultipleNodeTypes(AbstractAWSAutoscaleTest):
         #Set memory requirements so that sort jobs can be run
         # on small instances, but merge jobs must be run on large
         # instances
+        toilOptions.extend(['--provisioner=aws', '--batchSystem=mesos',
+                            '--nodeTypes=' + ",".join(self.instanceTypes),
+                            '--maxNodes=' + ",".join(self.numWorkers)])
         runCommand = ['/home/venv/bin/python', '/home/sort.py', '--fileToSort=/home/s3am/bin/asadmin', '--sortMemory=0.6G', '--mergeMemory=3.0G']
         runCommand.extend(toilOptions)
         runCommand.append('--sseKey=/home/keyFile')
@@ -320,7 +376,6 @@ class AWSRestartTest(AbstractAWSAutoscaleTest):
         super(AWSRestartTest, self).setUp()
         self.instanceTypes = ['t2.small']
         self.numWorkers = ['1']
-        self.scriptDir = '/tmp/t/'
         self.scriptName = self.scriptDir + 'restartScript.py'
         self.jobStore = 'aws:%s:restart-%s' % (self.awsRegion(), uuid4())
 
@@ -347,7 +402,7 @@ class AWSRestartTest(AbstractAWSAutoscaleTest):
         with open(tempfile_path, 'w') as f:
             # use appliance ssh method instead of sshutil so we can specify input param
             f.write(script)
-        cluster = cluster_factory(provisioner='aws', clusterName=self.clusterName)
+        cluster = cluster_factory(provisioner='aws', zone=self.zone, clusterName=self.clusterName)
         leader = cluster.getLeader()
         self.sshUtil(['mkdir', '-p', self.scriptDir])  # hot deploy doesn't seem permitted to work in normal /tmp or /home
         leader.injectFile(tempfile_path, self.scriptName, 'toil_leader')
@@ -355,6 +410,10 @@ class AWSRestartTest(AbstractAWSAutoscaleTest):
             os.remove(tempfile_path)
 
     def _runScript(self, toilOptions):
+        # Use the provisioner in the workflow
+        toilOptions.extend(['--provisioner=aws', '--batchSystem=mesos',
+                            '--nodeTypes=' + ",".join(self.instanceTypes),
+                            '--maxNodes=' + ",".join(self.numWorkers)])
         # clean = onSuccess
         disallowedOptions = ['--clean=always', '--retryCount=2']
         newOptions = [option for option in toilOptions if option not in disallowedOptions]
@@ -417,11 +476,14 @@ class PreemptableDeficitCompensationTest(AbstractAWSAutoscaleTest):
 
         script = dedent('\n'.join(getsource(userScript).split('\n')[1:]))
         # use appliance ssh method instead of sshutil so we can specify input param
-        cluster = cluster_factory(provisioner='aws', clusterName=self.clusterName)
+        cluster = cluster_factory(provisioner='aws', zone=self.zone, clusterName=self.clusterName)
         leader = cluster.getLeader()
         leader.sshAppliance('tee', '/home/userScript.py', input=script)
 
     def _runScript(self, toilOptions):
+        toilOptions.extend(['--provisioner=aws', '--batchSystem=mesos',
+                            '--nodeTypes=' + ",".join(self.instanceTypes),
+                            '--maxNodes=' + ",".join(self.numWorkers)])
         toilOptions.extend(['--preemptableCompensation=1.0'])
         command = ['/home/venv/bin/python', '/home/userScript.py']
         command.extend(toilOptions)
