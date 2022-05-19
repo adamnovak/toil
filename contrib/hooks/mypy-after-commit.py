@@ -18,8 +18,14 @@ def main(argc, argv):
     # No input; we want to run in the background
     if in_acceptable_environment():
         announce('Type-checking commit')
-        result, log = check_to_cache(get_current_commit())
-        if result:
+        commit = get_current_commit()
+        result, log = check_to_cache(commit, timeout=0.1)
+        if result is None:
+            # Type checking timed out
+            announce('This is taking a while. Type-checking in the background.')
+            if os.fork() == 0:
+                check_to_cache(commit)
+        elif result:
             announce('Commit OK')
         else:
             complain('Commit did not type-check!')

@@ -6,7 +6,7 @@ import sys
 import os
 import subprocess
 
-from subprocess import CalledProcessError
+from subprocess import CalledProcessError, TimeoutExpired
 from typing import Tuple, Optional
 
 def complain(message):
@@ -78,9 +78,9 @@ def read_cache(commit: str) -> Tuple[Optional[bool], Optional[str]]:
         log = open(fullname).read()
     return status, log
 
-def check_to_cache(local_object) -> Tuple[bool, str]:
+def check_to_cache(local_object, timeout: float = None) -> Tuple[Optional[bool], Optional[str]]:
     """
-    Type-check current commit and save result to cache. Return status and log.
+    Type-check current commit and save result to cache. Return status and log, or None, None if a timeout is hit.
     """
 
     try:
@@ -96,3 +96,6 @@ def check_to_cache(local_object) -> Tuple[bool, str]:
         # Save this in a cache
         write_cache(local_object, False, log)
         return False, log
+    except TimeoutExpired:
+        return None, None
+        
