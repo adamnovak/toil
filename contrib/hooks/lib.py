@@ -85,7 +85,7 @@ def check_to_cache(local_object, timeout: float = None) -> Tuple[Optional[bool],
 
     try:
         # As a hook we know we're in the project root when running.
-        mypy_output = subprocess.check_output(['make', 'mypy'], stderr=subprocess.STDOUT)
+        mypy_output = subprocess.check_output(['make', 'mypy'], stderr=subprocess.STDOUT, timeout=timeout)
         log = mypy_output.decode('utf-8')
         # If we get here it passed
         write_cache(local_object, True, log)
