@@ -25,7 +25,7 @@ def check_can_run(local_object) -> bool:
     """
     Make sure we would be able to run mypy on the given commit.
     """
-    
+
     if not inVirtualEnv():
         # We need to be in the virtualenv to be able to run mypy
         announce('Virtual environment is not active.')
@@ -39,12 +39,12 @@ def check_can_run(local_object) -> bool:
         announce(f'Commit being pushed is not currently checked out')
         return False
     return True
-    
+
 def check_checked_out_commit(local_object) -> bool:
     """
     If the checked-out commit does not type-check, return false. Else, return true.
     """
-    
+
     status, log = read_cache(local_object)
     if status is None:
         announce('Commit has not been type-checked. Checking now.')
@@ -67,7 +67,7 @@ def check_checked_out_commit(local_object) -> bool:
     elif status == True:
         announce('Commit passed type-checking.')
         return True
-    
+
 def main(argc, argv):
     for line in sys.stdin:
         line = line.strip()

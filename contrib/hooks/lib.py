@@ -20,13 +20,13 @@ def announce(message):
     sys.stderr.write(message)
     sys.stderr.write('\n')
     sys.stderr.flush()
-    
+
 def get_current_commit() -> str:
     """
     Get the currently checked-out commit.
     """
     return subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('utf-8').strip()
-    
+
 # We have a cache for mypy results so we can compute them in advance.
 CACHE_DIR = '.mypy_result_cache'
 
@@ -34,7 +34,7 @@ def write_cache(commit: str, result: bool, log: str) -> None:
     """
     Save the given status and log to the cache for the given commit.
     """
-    
+
     os.makedirs(CACHE_DIR, exist_ok=True)
     basename = os.path.join(CACHE_DIR, commit)
     if os.path.exists(basename + '.fail.txt'):
@@ -49,10 +49,10 @@ def read_cache(commit: str) -> Tuple[Optional[bool], Optional[str]]:
     """
     Read the status and log from the cache for the given commit.
     """
-    
+
     status = None
     log = None
-    
+
     basename = os.path.join(CACHE_DIR, commit)
     fullname = None
     if os.path.exists(basename + '.fail.txt'):
@@ -66,12 +66,12 @@ def read_cache(commit: str) -> Tuple[Optional[bool], Optional[str]]:
     if fullname:
         log = open(fullname).read()
     return status, log
-    
+
 def check_to_cache(local_object) -> Tuple[bool, str]:
     """
     Type-check current commit and save result to cache. Return status and log.
     """
-    
+
     try:
         # As a hook we know we're in the project root when running.
         mypy_output = subprocess.check_output(['make', 'mypy'], stderr=subprocess.STDOUT)

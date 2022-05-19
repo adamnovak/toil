@@ -19,7 +19,7 @@ try:
 except:
     complain('Warning: Toil cannot be imported! Whatever you are pushing might not work!')
     sys.exit(0)
-    
+
 def main(argc, argv):
     # No input; we want to run in the background
     check_to_cache(get_current_commit())
