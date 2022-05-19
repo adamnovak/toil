@@ -18,7 +18,11 @@ def main(argc, argv):
     # No input; we want to run in the background
     if in_acceptable_environment():
         announce('Type-checking commit')
-        check_to_cache(get_current_commit())
+        result, log = check_to_cache(get_current_commit())
+        if result:
+            announce('Commit OK')
+        else:
+            complain('Commit did not type-check!')
     return 0
 
 if __name__ == "__main__":
