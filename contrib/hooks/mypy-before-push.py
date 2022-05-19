@@ -13,22 +13,15 @@ import subprocess
 import os
 from typing import Tuple, Optional
 
-from lib import complain, announce, write_cache, read_cache, check_to_cache, get_current_commit
-
-try:
-    from toil import inVirtualEnv
-except:
-    complain('Warning: Toil cannot be imported! Whatever you are pushing might not work!')
-    sys.exit(0)
+from lib import complain, announce, in_acceptable_environment, write_cache, read_cache, check_to_cache, get_current_commit
 
 def check_can_run(local_object) -> bool:
     """
     Make sure we would be able to run mypy on the given commit.
     """
 
-    if not inVirtualEnv():
-        # We need to be in the virtualenv to be able to run mypy
-        announce('Virtual environment is not active.')
+    if not in_acceptable_environment():
+        announce('Environment not set up for type checking.')
         return False
     try:
         current_object = get_current_commit()

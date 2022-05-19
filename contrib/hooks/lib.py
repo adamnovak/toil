@@ -21,6 +21,17 @@ def announce(message):
     sys.stderr.write('\n')
     sys.stderr.flush()
 
+def in_acceptable_environment() -> bool:
+    try:
+        # We need to be able to get at Toil, and we need to be in a virtual
+        # environment.
+        from toil import inVirtualEnv
+        return inVirtualEnv()
+    except:
+        # If we can't do that, either we're not in a Toil dev environment or
+        # Toil is Very Broken and that will be caught other ways.
+        return False
+
 def get_current_commit() -> str:
     """
     Get the currently checked-out commit.
