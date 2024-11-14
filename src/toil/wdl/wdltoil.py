@@ -83,7 +83,7 @@ from toil.jobStores.abstractJobStore import (
 from toil.lib.accelerators import get_individual_local_accelerators
 from toil.lib.conversions import VALID_PREFIXES, convert_units, human2bytes
 from toil.lib.integration import resolve_workflow
-from toil.lib.io import mkdtemp
+from toil.lib.io import mkdtemp, file_digest
 from toil.lib.memoize import memoize
 from toil.lib.misc import get_user_name
 from toil.lib.resources import ResourceMonitor
@@ -91,65 +91,6 @@ from toil.lib.threading import global_mutex
 from toil.provisioners.clusterScaler import JobTooBigError
 
 logger = logging.getLogger(__name__)
-
-# We want to use hashlib.file_digest to avoid a 3-line hashing loop like
-# MiniWDL has. But it is only in 3.11+
-#
-# So we need to have a function that is either it or a fallback with the
-# hashing loop.
-#
-# So we need to be able to articulate the type of that function for MyPy, to
-# avoid needing to write a function with the *exact* signature of the import
-# (and not e.g. one that needs slightly different methods of its fileobjs or is
-# missing some kwarg features).
-#
-# So we need to define some protocols.
-#
-# TODO: Move this into lib somewhere?
-# TODO: Give up and license the 3 line loop MiniWDL has?
-class ReadableFileObj(Protocol):
-    """
-    Protocol that is more specific than what file_digest takes as an argument.
-    Also guarantees a read() method.
-
-    Would extend the protocol from Typeshed for hashlib but those are only
-    declared for 3.11+.
-    """
-    def readinto(self, buf: bytearray, /) -> int: ...
-    def readable(self) -> bool: ...
-    def read(self, number: int) -> bytes: ...
-
-class FileDigester(Protocol):
-    """
-    Protocol for the features we need from hashlib.file_digest.
-    """
-    # We need __ prefixes here or the name of the argument becomes part of the required interface.
-    def __call__(self, __f: ReadableFileObj, __alg_name: str) -> hashlib._Hash: ...
-
-try:
-    # Don't do a direct conditional import to the final name here because then
-    # the polyfill needs *exactly* the signature of file_digest, and not just
-    # one that can accept all calls we make in the file, or MyPy will complain.
-    #
-    # We need to tell MyPy we expect this import to fail, when typechecking on
-    # pythons that don't have it. But we also need to tell it that it is fine
-    # if it succeeds, for Pythons that do have it.
-    #
-    # TODO: Change to checking sys.version_info because MyPy understands that
-    # better?
-    from hashlib import file_digest as file_digest_impl # type: ignore[attr-defined,unused-ignore]
-    file_digest: FileDigester = file_digest_impl
-except ImportError:
-    # Polyfill file_digest from 3.11+
-    def file_digest_fallback_impl(f: ReadableFileObj, alg_name: str) -> hashlib._Hash:
-        BUFFER_SIZE = 1024 * 1024
-        hasher = hashlib.new(alg_name)
-        buffer = f.read(BUFFER_SIZE)
-        while buffer:
-            hasher.update(buffer)
-            buffer = f.read(BUFFER_SIZE)
-        return hasher
-    file_digest = file_digest_fallback_impl
 
 # WDL options to pass into the WDL jobs and standard libraries
 #   task_path: Dotted WDL name of the part of the workflow this library is working for.
