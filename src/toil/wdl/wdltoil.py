@@ -5364,7 +5364,7 @@ def main() -> None:
 
                         # We need the absolute path or URL to raise the error
                         if input_source_uri is not None:
-                            # If this is a local fike, use that as the abspath.
+                            # If this is a local file, use that as the abspath.
                             # Otherwise just pass through a URL.
                             inputs_abspath = (
                                 input_source_uri
