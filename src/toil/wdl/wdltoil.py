@@ -678,6 +678,41 @@ def recursive_dependencies(root: WDL.Tree.WorkflowNode) -> set[str]:
     # And produce the diff
     return needed - provided
 
+def for_each_root_expr(root: WDL.Tree.WorkflowNode) -> Iterator[WDL.Expr.Base]:
+    """
+    Given a root WorkflowNode, yield each top-level expression inside it.
+    """
+    for node in for_each_node(root):
+        if isinstance(node, WDL.Tree.Decl):
+            yield node.expr
+        elif isinstance(node, WDL.Tree.Call):
+            yield from node.inputs.values()
+        elif isinstance(node, WDL.Tree.Scatter):
+            yield node.expr
+        elif isinstance(node, WDL.Tree.Conditional):
+            yield node.expr
+
+def for_each_expr(root: WDL.Tree.WorkflowNode) -> Iterator[WDL.Expr.Base]:
+    """
+    Given a root WorkflowNode, yield each expression tree node inside it recursively.
+    """
+    for expr_root in for_each_root_expr(root):
+        # Traverse the whole SourceNode subtree looking for Expr nodes
+        queue: list[WDL.Error.SourceNode] = [expr_root]
+        while len(queue) > 0:
+            item = queue[-1]
+            queue.pop()
+            if isinstance(item, WDL.Expr.Base):
+                yield item
+            for child in item.children:
+                queue.append(child)
+
+def for_each_ident(root: WDL.Tree.WorkflowNode) -> Iterator[WDL.Expr.Ident]:
+    """
+    Given a root WorkflowNode, yield each identifier reference inside it recursively.
+    """
+    return (item for itme in for_each_expr(root) if isinstance(item, WDL.Expr.Ident))
+
 
 def parse_disks(
     spec: str, disks_spec: list[WDL.Value.String] | str
@@ -2429,7 +2464,6 @@ def evaluate_defaultable_decl(
         logger.exception("Evaluation failed for %s", node)
         log_bindings(logger.error, "Statement was evaluated in:", [environment])
         raise
-
 
 # TODO: make these stdlib methods???
 def devirtualize_files(
@@ -4188,6 +4222,8 @@ class WDLWorkflowGraph:
     """
     Represents a graph of WDL WorkflowNodes.
 
+    Lets you look at the dependency graph and the data flow along it.
+
     Operates at a certain level of instantiation (i.e. sub-sections are
     represented by single nodes).
 
@@ -4320,6 +4356,29 @@ class WDLWorkflowGraph:
                     # Mark everything depended on as not a leaf
                     leaves.remove(dependency)
         return list(leaves)
+
+    def get_references(self, node_id: str) -> tuple[str, str]:
+        """
+        Get pairs of workflow node ID and variable name referenced by a
+        workflow node, recursively (into the node if it has a body) but not
+        transitively.
+        """
+        
+        node = self.get(node_id)
+        for ident in for_each_ident(node):
+            # Translate each identifier reference into the tuple format.
+            # Ignore references back into the workflow node itself (like within a section).
+            target_node = ident.referee
+            if target_node is None:
+                raise RuntimeError(f"Unresolved reference: {ident}")
+            target_id = self.real_id(target_node.workflow_node_id)
+            if target_id == node.workflow_node_id:
+                # Skip internal reference
+                continue
+            yield (target_id, ident.name)
+
+
+
 
 
 class WDLSectionJob(WDLBaseJob):
