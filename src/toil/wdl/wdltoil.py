@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import errno
 import hashlib
 import io
@@ -118,76 +119,7 @@ logger = logging.getLogger(__name__)
 # we use for CWL. CWL brings along the file basename in its file type, but
 # WDL.Value.File doesn't. So we need to make sure we stash that somewhere in
 # the URI.
-# TODO: We need to also make sure files from the same source directory end up
-# in the same destination directory, when dealing with basename conflicts.
 
-
-# We want to use hashlib.file_digest to avoid a 3-line hashing loop like
-# MiniWDL has. But it is only in 3.11+
-#
-# So we need to have a function that is either it or a fallback with the
-# hashing loop.
-#
-# So we need to be able to articulate the type of that function for MyPy, to
-# avoid needing to write a function with the *exact* signature of the import
-# (and not e.g. one that needs slightly different methods of its fileobjs or is
-# missing some kwarg features).
-#
-# So we need to define some protocols.
-#
-# TODO: Move this into lib somewhere?
-# TODO: Give up and license the 3 line loop MiniWDL has?
-class ReadableFileObj(Protocol):
-    """
-    Protocol that is more specific than what file_digest takes as an argument.
-    Also guarantees a read() method.
-
-    Would extend the protocol from Typeshed for hashlib but those are only
-    declared for 3.11+.
-    """
-
-    def readinto(self, buf: bytearray, /) -> int: ...
-    def readable(self) -> bool: ...
-    def read(self, number: int) -> bytes: ...
-
-
-class FileDigester(Protocol):
-    """
-    Protocol for the features we need from hashlib.file_digest.
-    """
-
-    # We need __ prefixes here or the name of the argument becomes part of the required interface.
-    def __call__(self, __f: ReadableFileObj, __alg_name: str) -> hashlib._Hash: ...
-
-
-try:
-    # Don't do a direct conditional import to the final name here because then
-    # the polyfill needs *exactly* the signature of file_digest, and not just
-    # one that can accept all calls we make in the file, or MyPy will complain.
-    #
-    # We need to tell MyPy we expect this import to fail, when typechecking on
-    # pythons that don't have it. But we also need to tell it that it is fine
-    # if it succeeds, for Pythons that do have it.
-    #
-    # TODO: Change to checking sys.version_info because MyPy understands that
-    # better?
-    from hashlib import file_digest as file_digest_impl  # type: ignore[attr-defined,unused-ignore]
-
-    file_digest: FileDigester = file_digest_impl
-except ImportError:
-    # Polyfill file_digest from 3.11+
-    def file_digest_fallback_impl(f: ReadableFileObj, alg_name: str) -> hashlib._Hash:
-        BUFFER_SIZE = 1024 * 1024
-        hasher = hashlib.new(alg_name)
-        buffer = f.read(BUFFER_SIZE)
-        while buffer:
-            hasher.update(buffer)
-            buffer = f.read(BUFFER_SIZE)
-        return hasher
-
-    file_digest = file_digest_fallback_impl
-
->>>>>>> upstream/master
 # WDL options to pass into the WDL jobs and standard libraries
 #   task_path: Dotted WDL name of the part of the workflow this library is working for.
 #   namespace: namespace of the WDL that the current job is in
@@ -705,7 +637,8 @@ def for_each_root_expr(root: WDL.Tree.WorkflowNode) -> Iterator[WDL.Expr.Base]:
     """
     for node in for_each_node(root):
         if isinstance(node, WDL.Tree.Decl):
-            yield node.expr
+            if node.expr is not None:
+                yield node.expr
         elif isinstance(node, WDL.Tree.Call):
             yield from node.inputs.values()
         elif isinstance(node, WDL.Tree.Scatter):
@@ -731,8 +664,10 @@ def for_each_expr(root: WDL.Tree.WorkflowNode) -> Iterator[WDL.Expr.Base]:
 def for_each_ident(root: WDL.Tree.WorkflowNode) -> Iterator[WDL.Expr.Ident]:
     """
     Given a root WorkflowNode, yield each identifier reference inside it recursively.
+
+    Will include duplicates.
     """
-    return (item for itme in for_each_expr(root) if isinstance(item, WDL.Expr.Ident))
+    return (item for item in for_each_expr(root) if isinstance(item, WDL.Expr.Ident))
 
 
 def parse_disks(
@@ -1353,9 +1288,10 @@ def convert_remote_files(
     :param file_source: Context to search for files with
     :param task_path: Dotted WDL name of the user-level code doing the
         importing (probably the workflow name).
-    :param search_paths: If set, try resolving input location relative to the URLs or
-        directories in this list.
-    :param import_remote_files: If set, import files from remote locations. Else leave them as URI references.
+    :param search_paths: If set, try resolving input location relative to the
+        URLs or directories in this list.
+    :param import_remote_files: If set, import files from remote locations.
+        Else leave them as URI references.
     """
     path_to_id: dict[str, uuid.UUID] = {}
 
@@ -2908,12 +2844,7 @@ class WDLBaseJob(Job):
     """
     Base job class for all WDL-related jobs.
 
-    Responsible for post-processing returned bindings, to do things like add in
-    null values for things not defined in a section. Post-processing operations
-    can be added onto any job before it is saved, and will be applied as long
-    as the job's run method calls postprocess().
-
-    Also responsible for remembering the Toil WDL configuration keys and values.
+    Responsible for remembering the Toil WDL configuration keys and values.
     """
 
     def __init__(self, wdl_options: WDLContext, **kwargs: Any) -> None:
@@ -2938,11 +2869,6 @@ class WDLBaseJob(Job):
         # TODO: Make sure C-level stack size is also big enough for this.
         sys.setrecursionlimit(10000)
 
-        # We need an ordered list of postprocessing steps to apply, because we
-        # may have coalesced postprocessing steps deferred by several levels of
-        # jobs returning other jobs' promised RVs.
-        self._postprocessing_steps: list[tuple[str, str | Promised[WDLBindings]]] = []
-
         self._wdl_options = wdl_options
 
         assert self._wdl_options.get("container") is not None
@@ -2960,6 +2886,28 @@ class WDLBaseJob(Job):
         # bindings are actually linked lists or something?
         sys.setrecursionlimit(10000)
 
+class WDLBindingsJob(WDLBaseJob):
+    """
+    Class for all jobs dealing in WDL Bindings.
+
+    Responsible for post-processing returned bindings, to do things like add in
+    null values for things not defined in a section. Post-processing operations
+    can be added onto any job before it is saved, and will be applied as long
+    as the job's run method calls postprocess().
+    """
+    
+    def __init__(self, wdl_options: WDLContext, **kwargs: Any) -> None:
+        """
+        Make a new WDL job that can do postprocessing of bindings.
+        """
+        
+        super().__init__(wdl_options, **kwargs)
+
+        # We need an ordered list of postprocessing steps to apply, because we
+        # may have coalesced postprocessing steps deferred by several levels of
+        # jobs returning other jobs' promised RVs.
+        self._postprocessing_steps: list[tuple[str, str | set[str] | Promised[WDLBindings]]] = []
+
     def then_underlay(self, underlay: Promised[WDLBindings]) -> None:
         """
         Apply an underlay of backup bindings to the result.
@@ -2973,6 +2921,13 @@ class WDLBaseJob(Job):
         """
         logger.debug("Remove %s after %s", remove, self)
         self._postprocessing_steps.append(("remove", remove))
+
+    def then_keep_only(self, keep_only: Promised[set[str]]) -> None:
+        """
+        Remove all bindings but the ones with the given names from the result.
+        """
+        logger.debug("Keep only %s after %s", keep_only, self)
+        self._postprocessing_steps.append(("keep_only", keep_only))
 
     def then_namespace(self, namespace: str) -> None:
         """
@@ -3012,6 +2967,13 @@ class WDLBaseJob(Job):
                     raise RuntimeError("Wrong postprocessing argument type")
                 # We need to take stuff out of scope
                 bindings = bindings.subtract(argument)
+            elif action == "keep_only":
+                if not isinstance(argument, set):
+                    raise RuntimeError("Wrong postprocessing argument type")
+                log_bindings(logger.info, "Have bindings", [bindings])
+                bindings = bindings.filter(lambda binding: binding.name in argument)
+                logger.info("Keep variables: %s", argument)
+                # TODO: Bring these officially into scope somehow so WDLVariableOutOfScopeJob can clean up files in them
             elif action == "namespace":
                 if not isinstance(argument, str):
                     raise RuntimeError("Wrong postprocessing argument type")
@@ -3027,7 +2989,7 @@ class WDLBaseJob(Job):
 
         return bindings
 
-    def defer_postprocessing(self, other: WDLBaseJob) -> None:
+    def defer_postprocessing(self, other: WDLBindingsJob) -> None:
         """
         Give our postprocessing steps to a different job.
 
@@ -3040,7 +3002,7 @@ class WDLBaseJob(Job):
         logger.debug("Assigned postprocessing steps from %s to %s", self, other)
 
 
-class WDLTaskWrapperJob(WDLBaseJob):
+class WDLTaskWrapperJob(WDLBindingsJob):
     """
     Job that determines the resources needed to run a WDL job.
 
@@ -3280,7 +3242,7 @@ class WDLTaskWrapperJob(WDLBaseJob):
         return run_job.rv()
 
 
-class WDLTaskJob(WDLBaseJob):
+class WDLTaskJob(WDLBindingsJob):
     """
     Job that runs a WDL task.
 
@@ -4092,7 +4054,7 @@ class WDLTaskJob(WDLBaseJob):
         return output_bindings
 
 
-class WDLWorkflowNodeJob(WDLBaseJob):
+class WDLWorkflowNodeJob(WDLBindingsJob):
     """
     Job that evaluates a WDL workflow node.
     """
@@ -4173,7 +4135,7 @@ class WDLWorkflowNodeJob(WDLBaseJob):
 
             if isinstance(self._node.callee, WDL.Tree.Workflow):
                 # This is a call of a workflow
-                subjob: WDLBaseJob = WDLWorkflowJob(
+                subjob: WDLBindingsJob = WDLWorkflowJob(
                     self._node.callee,
                     [input_bindings, passed_down_bindings],
                     self._node.callee_id,
@@ -4196,7 +4158,8 @@ class WDLWorkflowNodeJob(WDLBaseJob):
                     self._node, "Cannot call a " + str(type(self._node.callee))
                 )
 
-            # We need to agregate outputs namespaced with our node name, and existing bindings
+            # We need to agregate outputs namespaced with our node name, and
+            # existing bindings
             subjob.then_namespace(self._node.name)
             subjob.then_overlay(incoming_bindings)
             self.defer_postprocessing(subjob)
@@ -4231,7 +4194,7 @@ class WDLWorkflowNodeJob(WDLBaseJob):
             )
 
 
-class WDLWorkflowNodeListJob(WDLBaseJob):
+class WDLWorkflowNodeListJob(WDLBindingsJob):
     """
     Job that evaluates a list of WDL workflow nodes, which are in the same
     scope and in a topological dependency order, and which do not call out to any other
@@ -4290,7 +4253,34 @@ class WDLWorkflowNodeListJob(WDLBaseJob):
         return self.postprocess(current_bindings)
 
 
-class WDLCombineBindingsJob(WDLBaseJob):
+class WDLVariableOutOfScopeJob(WDLBaseJob):
+    """
+    Job that handles when a variable's last reference has been used.
+
+    Unlike most jobs, doesn't return Bindings and so isn't a WDLBindingsJob.
+    """
+
+    def __init__(self, source_workflow_node_id: str, source_variable: str, **kwargs: Any) -> None:
+        """
+        Make a job to handle a variable going out of scope.
+        """
+
+        super().__init__(**kwargs)
+
+        self._source_workflow_node_id = source_workflow_node_id
+        self._source_variable = source_variable
+
+    @report_wdl_errors("take variable out of scope")
+    def run(self, file_store: AbstractFileStore) -> None:
+        logger.info("Variable %s from workflow node %s no longer needed!", self._source_workflow_node_id, self._source_variable)
+
+        # TODO: Implement file cleanup!
+
+    
+
+
+
+class WDLCombineBindingsJob(WDLBindingsJob):
     """
     Job that collects the results from WDL workflow nodes and combines their
     environment changes.
@@ -4349,11 +4339,17 @@ class WDLWorkflowGraph:
         self._gather_to_section: dict[str, str] = {}
         for node in nodes:
             if isinstance(node, WDL.Tree.WorkflowSection):
+                gather_node: WDL.Tree.WorkflowNode
                 for gather_node in node.gathers.values():
-                    self._gather_to_section[gather_node.workflow_node_id] = (
-                        node.workflow_node_id
-                    )
-
+                    while isinstance(gather_node, WDL.Tree.Gather):
+                        self._gather_to_section[gather_node.workflow_node_id] = (
+                            node.workflow_node_id
+                        )
+                        # Follow chains of gathers. Anything referring into a
+                        # child section in this section should be seen as
+                        # referring to the child section.
+                        gather_node = gather_node.referee
+                    
         # Store all the nodes by ID, except the gathers which we elide.
         self._nodes: dict[str, WDL.Tree.WorkflowNode] = {
             node.workflow_node_id: node
@@ -4464,7 +4460,7 @@ class WDLWorkflowGraph:
                     leaves.remove(dependency)
         return list(leaves)
 
-    def get_references(self, node_id: str) -> tuple[str, str]:
+    def get_references(self, node_id: str) -> Iterator[tuple[str, str]]:
         """
         Get pairs of workflow node ID and variable name referenced by a
         workflow node, recursively (into the node if it has a body) but not
@@ -4472,7 +4468,13 @@ class WDLWorkflowGraph:
         """
         
         node = self.get(node_id)
+        seen = set()
         for ident in for_each_ident(node):
+            # Deduplicate the referenced identifiers
+            if str(ident.name) in seen:
+                continue
+            seen.add(str(ident.name))
+
             # Translate each identifier reference into the tuple format.
             # Ignore references back into the workflow node itself (like within a section).
             target_node = ident.referee
@@ -4482,13 +4484,27 @@ class WDLWorkflowGraph:
             if target_id == node.workflow_node_id:
                 # Skip internal reference
                 continue
-            yield (target_id, ident.name)
+            # Make sure to convert names from WDL tokens to plain strings.
+            yield (target_id, str(ident.name))
 
+    def get_all_referees(self) -> dict[tuple[str, str], list[str]]:
+        """
+        Get a mapping from workflow node ID and variable name to all the
+        workflow node IDs that refer to that variable.
+        """
+        
+        result = collections.defaultdict(list)
 
+        for node_id in self._nodes.keys():
+            # For each node
+            for reference in self.get_references(node_id):
+                # For each thing it references, register it
+                result[reference].append(node_id)
+        
+        logger.info("All referees: %s", result)
+        return result
 
-
-
-class WDLSectionJob(WDLBaseJob):
+class WDLSectionJob(WDLBindingsJob):
     """
     Job that can create more graph for a section of the workflow.
     """
@@ -4579,7 +4595,7 @@ class WDLSectionJob(WDLBaseJob):
         environment: WDLBindings,
         local_environment: WDLBindings | None = None,
         subscript: int | None = None,
-    ) -> WDLBaseJob:
+    ) -> WDLBindingsJob:
         """
         Make a Toil job to evaluate a subgraph inside a workflow or workflow
         section.
@@ -4617,12 +4633,23 @@ class WDLSectionJob(WDLBaseJob):
         # properly.
 
         # When a WDL node depends on another, we need to be able to find the Toil job we need an rv from.
-        wdl_id_to_toil_job: dict[str, WDLBaseJob] = {}
+        wdl_id_to_toil_job: dict[str, WDLBindingsJob] = {}
         # We need the set of Toil jobs not depended on so we can wire them up to the sink.
         # This maps from Toil job store ID to job.
-        toil_leaves: dict[str | TemporaryID, WDLBaseJob] = {}
+        toil_leaves: dict[str | TemporaryID, WDLBindingsJob] = {}
 
-        def get_job_set_any(wdl_ids: set[str]) -> list[WDLBaseJob]:
+        # We also need this mapping from (source node, variable name) to user
+        # nodes, to create cleanup jobs when referenced variables go out of
+        # scope.
+        variable_to_referees = section_graph.get_all_referees()
+
+        # And this map from source node to variable name that actually is
+        # referenced later, which we can use to prune down outputs.
+        referenced_variables_from = collections.defaultdict(list)
+        for (node_id, variable_name) in variable_to_referees.keys():
+            referenced_variables_from[node_id].append(variable_name)
+
+        def get_job_set_any(wdl_ids: set[str]) -> list[WDLBindingsJob]:
             """
             Get the distinct Toil jobs executing any of the given WDL nodes.
             """
@@ -4639,13 +4666,15 @@ class WDLSectionJob(WDLBaseJob):
         creation_order = section_graph.topological_order()
         logger.debug("Creation order: %s", creation_order)
 
-        # Now we want to organize the linear list of nodes into collections of nodes that can be in the same Toil job.
+        # Now we want to organize the linear list of nodes into collections of
+        # nodes that can be in the same Toil job.
         creation_jobs = self.coalesce_nodes(creation_order, section_graph)
         logger.debug("Creation jobs: %s", creation_jobs)
 
         for node_ids in creation_jobs:
             logger.debug("Make Toil job for %s", node_ids)
-            # Collect the return values from previous jobs. Some nodes may have been inputs, without jobs.
+            # Collect the return values from previous jobs. Some nodes may have
+            # been inputs, without jobs.
             # Don't inlude stuff in the current batch.
             prev_node_ids = {
                 prev_node_id
@@ -4668,7 +4697,7 @@ class WDLSectionJob(WDLBaseJob):
 
             if len(node_ids) == 1:
                 # Make a one-node job
-                job: WDLBaseJob = WDLWorkflowNodeJob(
+                job: WDLBindingsJob = WDLWorkflowNodeJob(
                     section_graph.get(node_ids[0]),
                     rvs,
                     wdl_options=self._wdl_options,
@@ -4689,6 +4718,16 @@ class WDLSectionJob(WDLBaseJob):
                 # relationship, so we always use follow-ons.
                 prev_job.addFollowOn(job)
 
+            # Filter down the outputs from the job to just the variables
+            # defined there that actually are wanted elsewhere.
+            kept_variables = set()
+            for node_id in node_ids:
+                for variable_name in referenced_variables_from[node_id]:
+                    kept_variables.add(variable_name)
+            # TODO: Need to track incoming references from e.g. workflow outputs section into workflow body and keep those variables.
+            # TODO: Do these work right when bumped to other steps???
+            job.then_keep_only(kept_variables)
+
             if len(prev_jobs) == 0:
                 # Nothing came before this job, so connect it to the workflow.
                 self.addChild(job)
@@ -4697,12 +4736,32 @@ class WDLSectionJob(WDLBaseJob):
                 # Save the job for everything it executes
                 wdl_id_to_toil_job[node_id] = job
 
-            # It isn't depended on yet
+            # It isn't depended on yet by any other workflow stuff
             toil_leaves[job.jobStoreID] = job
+
+
+        for reference, destination_node_ids in variable_to_referees.items(): 
+            # Add in jobs to clean up variables that ever get referenced, after
+            # thier last reference goes away.
+            cleanup_job = WDLVariableOutOfScopeJob(
+                    reference[0],
+                    reference[1],
+                    wdl_options=self._wdl_options,
+                    local=True,
+            )
+            added_predecessor_jobs = set()
+            for destination_node_id in destination_node_ids:
+                id_job = wdl_id_to_toil_job[destination_node_id]
+                if id_job not in added_predecessor_jobs:
+                    # Add each job as a predecessor only once, even if it
+                    # contaisn multiple workflow nodes that referenced the
+                    # variable.
+                    id_job.addFollowOn(cleanup_job)
+                    added_predecessor_jobs.add(id_job)
 
         if len(toil_leaves) == 1:
             # There's one final node so we can just tack postprocessing onto that.
-            sink: WDLBaseJob = next(iter(toil_leaves.values()))
+            sink: WDLBindingsJob = next(iter(toil_leaves.values()))
         else:
             # We need to bring together with a new sink
             # Make the sink job to collect all their results.
@@ -4728,6 +4787,10 @@ class WDLSectionJob(WDLBaseJob):
         sink.then_underlay(self.make_gather_bindings(gather_nodes, WDL.Value.Null()))
         if local_environment is not None:
             sink.then_remove(local_environment)
+
+        # Apply the variable-goes-out-of-scope jobs.
+        # TODO: Batch up the variables with the same set of referees?
+
 
         return sink
 
@@ -4902,7 +4965,7 @@ class WDLScatterJob(WDLSectionJob):
         return gather_job.rv()
 
 
-class WDLArrayBindingsJob(WDLBaseJob):
+class WDLArrayBindingsJob(WDLBindingsJob):
     """
     Job that takes all new bindings created in an array of input environments,
     relative to a base environment, and produces bindings where each new
@@ -5165,7 +5228,7 @@ class WDLWorkflowJob(WDLSectionJob):
         return outputs_job.rv()
 
 
-class WDLOutputsJob(WDLBaseJob):
+class WDLOutputsJob(WDLBindingsJob):
     """
     Job which evaluates an outputs section for a workflow.
 
@@ -5318,7 +5381,7 @@ class WDLStartJob(WDLSectionJob):
         if isinstance(self._target, WDL.Tree.Workflow):
             # Create a workflow job. We rely in this to handle entering the input
             # namespace if needed, or handling free-floating inputs.
-            job: WDLBaseJob = WDLWorkflowJob(
+            job: WDLBindingsJob = WDLWorkflowJob(
                 self._target,
                 [inputs],
                 [self._target.name],
