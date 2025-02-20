@@ -4063,6 +4063,7 @@ class WDLWorkflowNodeJob(WDLBindingsJob):
         self,
         node: WDL.Tree.WorkflowNode,
         prev_node_results: Sequence[Promised[WDLBindings]],
+        inbound_references: set[str],
         wdl_options: WDLContext,
         **kwargs: Any,
     ) -> None:
@@ -4078,6 +4079,12 @@ class WDLWorkflowNodeJob(WDLBindingsJob):
 
         self._node = node
         self._prev_node_results = prev_node_results
+        # Remember referenced variables in case we make a sub-section, so we
+        # can say we need to keep them because they're referenced from above.
+        self._inbound_references = inbound_references
+
+        # Remember at the end to filter down to just referenced variables.
+        self.then_keep_only(inbound_references)
 
         if isinstance(self._node, WDL.Tree.Call):
             logger.debug("Preparing job for call node %s", self._node.workflow_node_id)
@@ -4089,6 +4096,8 @@ class WDLWorkflowNodeJob(WDLBindingsJob):
         """
         super().run(file_store)
         logger.info("Running node %s", self._node.workflow_node_id)
+        for binding in unwrap_all(self._prev_node_results):
+            log_bindings(logger.info, "Got an input binding set", [binding])
 
         # Combine the bindings we get from previous jobs
         incoming_bindings = combine_bindings(unwrap_all(self._prev_node_results))
@@ -4138,6 +4147,7 @@ class WDLWorkflowNodeJob(WDLBindingsJob):
                 subjob: WDLBindingsJob = WDLWorkflowJob(
                     self._node.callee,
                     [input_bindings, passed_down_bindings],
+                    inbound_references, # TODO: Un-namespace?
                     self._node.callee_id,
                     wdl_options=wdl_options,
                     local=True,
@@ -4168,6 +4178,7 @@ class WDLWorkflowNodeJob(WDLBindingsJob):
             subjob = WDLScatterJob(
                 self._node,
                 [incoming_bindings],
+                inbound_references,
                 wdl_options=self._wdl_options,
                 local=True,
             )
@@ -4180,6 +4191,7 @@ class WDLWorkflowNodeJob(WDLBindingsJob):
             subjob = WDLConditionalJob(
                 self._node,
                 [incoming_bindings],
+                inbound_references,
                 wdl_options=self._wdl_options,
                 local=True,
             )
@@ -4205,6 +4217,7 @@ class WDLWorkflowNodeListJob(WDLBindingsJob):
         self,
         nodes: list[WDL.Tree.WorkflowNode],
         prev_node_results: Sequence[Promised[WDLBindings]],
+        inbound_references: Sequence[str],
         wdl_options: WDLContext,
         **kwargs: Any,
     ) -> None:
@@ -4217,6 +4230,13 @@ class WDLWorkflowNodeListJob(WDLBindingsJob):
             wdl_options=wdl_options,
             **kwargs,
         )
+
+        # Remember referenced variables in case we make a sub-section, so we
+        # can say we need to keep them because they're referenced from above.
+        self._inbound_references = inbound_references
+
+        # Remember at the end to filter down to just referenced variables.
+        self.then_keep_only(inbound_references)
 
         self._nodes = nodes
         self._prev_node_results = prev_node_results
@@ -4356,6 +4376,18 @@ class WDLWorkflowGraph:
             for node in nodes
             if not isinstance(node, WDL.Tree.Gather)
         }
+
+        # Map from nodes to variables they define
+        self._variables = {}
+        for node_id, node in self._nodes.items():
+            if isinstance(node, WDL.Tree.Decl):
+                self._variables[str(node.name)] = node_id
+            elif isinstance(node, WDL.Tree.Call):
+                for binding in node.effective_outputs:
+                    self._variables[binding.name] = node_id
+
+            # TODO: Handle gathers that go down several levels and refer down to the source...
+
 
     def real_id(self, node_id: str) -> str:
         """
@@ -4509,12 +4541,16 @@ class WDLSectionJob(WDLBindingsJob):
     Job that can create more graph for a section of the workflow.
     """
 
-    def __init__(self, wdl_options: WDLContext, **kwargs: Any) -> None:
+    def __init__(self, inbound_references: set[str], wdl_options: WDLContext, **kwargs: Any) -> None:
         """
         Make a WDLSectionJob where the interior runs in the given namespace,
         starting with the root workflow.
         """
         super().__init__(wdl_options=wdl_options, **kwargs)
+
+        # Remember the inbound references, to keep them live through the end of
+        # any created section subgraph.
+        self._inbound_references = inbound_references
 
     @staticmethod
     def coalesce_nodes(
@@ -4643,6 +4679,11 @@ class WDLSectionJob(WDLBindingsJob):
         # scope.
         variable_to_referees = section_graph.get_all_referees()
 
+        # TODO: Find the source nodes that the bare variable names in
+        # self._inbound_references belong to, by looking at decl names and call
+        # effective outputs, and add them to the referee table with a special
+        # external user node.
+
         # And this map from source node to variable name that actually is
         # referenced later, which we can use to prune down outputs.
         referenced_variables_from = collections.defaultdict(list)
@@ -4695,11 +4736,20 @@ class WDLSectionJob(WDLBindingsJob):
             # We also need access to section-level bindings like inputs
             rvs.append(environment)
 
+            logger.debug("Depends on jobs %s for nodes %s", prev_jobs, prev_node_ids)
+
+            # Figure out what variables defined in the job will be wanted elsewhere.
+            kept_variables = set()
+            for node_id in node_ids:
+                for variable_name in referenced_variables_from[node_id]:
+                    kept_variables.add(variable_name)
+
             if len(node_ids) == 1:
                 # Make a one-node job
                 job: WDLBindingsJob = WDLWorkflowNodeJob(
                     section_graph.get(node_ids[0]),
                     rvs,
+                    kept_variables,
                     wdl_options=self._wdl_options,
                     local=True,
                 )
@@ -4708,6 +4758,7 @@ class WDLSectionJob(WDLBindingsJob):
                 job = WDLWorkflowNodeListJob(
                     [section_graph.get(node_id) for node_id in node_ids],
                     rvs,
+                    kept_variables,
                     wdl_options=self._wdl_options,
                     local=True,
                 )
@@ -4717,17 +4768,7 @@ class WDLSectionJob(WDLBindingsJob):
                 # We have a graph that only needs one kind of happens-after
                 # relationship, so we always use follow-ons.
                 prev_job.addFollowOn(job)
-
-            # Filter down the outputs from the job to just the variables
-            # defined there that actually are wanted elsewhere.
-            kept_variables = set()
-            for node_id in node_ids:
-                for variable_name in referenced_variables_from[node_id]:
-                    kept_variables.add(variable_name)
-            # TODO: Need to track incoming references from e.g. workflow outputs section into workflow body and keep those variables.
-            # TODO: Do these work right when bumped to other steps???
-            job.then_keep_only(kept_variables)
-
+           
             if len(prev_jobs) == 0:
                 # Nothing came before this job, so connect it to the workflow.
                 self.addChild(job)
@@ -4854,6 +4895,7 @@ class WDLScatterJob(WDLSectionJob):
         self,
         scatter: WDL.Tree.Scatter,
         prev_node_results: Sequence[Promised[WDLBindings]],
+        inbound_references: set[str],
         wdl_options: WDLContext,
         **kwargs: Any,
     ) -> None:
@@ -4861,6 +4903,7 @@ class WDLScatterJob(WDLSectionJob):
         Create a subtree that will run a WDL scatter. The scatter itself and the contents live in the given namespace.
         """
         super().__init__(
+            inbound_references,
             **kwargs,
             unitName=scatter.workflow_node_id,
             displayName=scatter.workflow_node_id,
@@ -5052,6 +5095,7 @@ class WDLConditionalJob(WDLSectionJob):
         self,
         conditional: WDL.Tree.Conditional,
         prev_node_results: Sequence[Promised[WDLBindings]],
+        inbound_references: set[str],
         wdl_options: WDLContext,
         **kwargs: Any,
     ) -> None:
@@ -5059,6 +5103,7 @@ class WDLConditionalJob(WDLSectionJob):
         Create a subtree that will run a WDL conditional. The conditional itself and its contents live in the given namespace.
         """
         super().__init__(
+            inbound_references,
             **kwargs,
             unitName=conditional.workflow_node_id,
             displayName=conditional.workflow_node_id,
@@ -5138,6 +5183,7 @@ class WDLWorkflowJob(WDLSectionJob):
         self,
         workflow: WDL.Tree.Workflow,
         prev_node_results: Sequence[Promised[WDLBindings]],
+        inbound_references: set[str],
         workflow_id: list[str],
         wdl_options: WDLContext,
         **kwargs: Any,
@@ -5149,7 +5195,7 @@ class WDLWorkflowJob(WDLSectionJob):
         :param namespace: the namespace that the workflow's *contents* will be
                in. Caller has already added the workflow's own name.
         """
-        super().__init__(wdl_options=wdl_options, **kwargs)
+        super().__init__(inbound_references, wdl_options=wdl_options, **kwargs)
 
         # Because we need to return the return value of the workflow, we need
         # to return a Toil promise for the last/sink job in the workflow's
@@ -5348,7 +5394,7 @@ class WDLOutputsJob(WDLBindingsJob):
         return self.postprocess(output_bindings)
 
 
-class WDLStartJob(WDLSectionJob):
+class WDLStartJob(WDLBindingsJob):
     """
     Job that evaluates an entire WDL workflow, and returns the workflow outputs
     namespaced with the workflow name. Inputs may or may not be namespaced with
@@ -5384,6 +5430,7 @@ class WDLStartJob(WDLSectionJob):
             job: WDLBindingsJob = WDLWorkflowJob(
                 self._target,
                 [inputs],
+                set(),
                 [self._target.name],
                 wdl_options=self._wdl_options,
                 local=True,
@@ -5433,7 +5480,7 @@ class WDLInstallImportsJob(Job):
         return convert_files(self._inputs, candidate_to_fileid, file_to_data, self._task_path)
 
 
-class WDLImportWrapper(WDLSectionJob):
+class WDLImportWrapper(WDLBindingsJob):
     """
     Job to organize importing files on workers instead of the leader. Responsible for extracting filenames and metadata,
     calling ImportsJob, applying imports to input bindings, and scheduling the start workflow job
@@ -5498,9 +5545,9 @@ def make_root_job(
     toil: Toil,
     wdl_options: WDLContext,
     options: Namespace,
-) -> WDLSectionJob:
+) -> WDLBindingsJob:
     if options.run_imports_on_workers:
-        root_job: WDLSectionJob = WDLImportWrapper(
+        root_job: WDLBindingsJob = WDLImportWrapper(
             target,
             inputs,
             wdl_options=wdl_options,
