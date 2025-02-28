@@ -315,6 +315,35 @@ class WDLTests(BaseWDLTest):
         assert "wf.should_never_output" not in result
 
     @needs_singularity_or_docker
+    def test_all_call_outputs_nested(self):
+        """
+        Test if Toil can collect all call outputs from a workflow that calls subworkflows.
+        """
+        wdl = os.path.abspath("src/toil/test/wdl/testfiles/not_enough_outputs_nested.wdl")
+
+        # With flag on we include the call outputs which in turn include their
+        # internal calls' outputs
+        result_json = subprocess.check_output(
+            self.base_command
+            + [
+                wdl,
+                "-o",
+                self.output_dir,
+                "--logInfo",
+                "--retryCount=0",
+                "--allCallOutputs=on",
+            ]
+        )
+        result = json.loads(result_json)
+        
+        assert "wf.only_result" in result
+        assert "wf.childcall.only_result" in result
+        assert "wf.childcall.do_math.square" in result
+        assert "wf.childcall.do_math.cube" in result
+        assert "wf.should_never_output" not in result
+        assert "wf.childcall.should_never_output" not in result
+
+    @needs_singularity_or_docker
     def test_croo_detection(self):
         """
         Test if Toil can detect and do something sensible with Cromwell Output Organizer workflows.
