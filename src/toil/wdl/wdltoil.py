@@ -4466,19 +4466,6 @@ class WDLWorkflowGraph:
             sorter.add(node_id, *self.get_dependencies(node_id))
         return list(sorter.static_order())
 
-    def leaves(self) -> list[str]:
-        """
-        Get all the workflow node IDs that have no dependents in the graph.
-        """
-
-        leaves = set(self._nodes.keys())
-        for node_id in self._nodes.keys():
-            for dependency in self.get_dependencies(node_id):
-                if dependency in leaves:
-                    # Mark everything depended on as not a leaf
-                    leaves.remove(dependency)
-        return list(leaves)
-
     def get_references(self, node_id: str) -> Iterator[tuple[str, str]]:
         """
         Get pairs of workflow node ID and variable name referenced by a
@@ -4666,13 +4653,14 @@ class WDLSectionJob(WDLBindingsJob):
         environment: WDLBindings,
         local_environment: WDLBindings | None = None,
         subscript: int | None = None,
-    ) -> WDLBindingsJob:
+    ) -> Optional[WDLBindingsJob]:
         """
         Make a Toil job to evaluate a subgraph inside a workflow or workflow
         section.
 
-        :returns: a child Job that will return the aggregated environment
-                  after running all the things in the section.
+        :returns: a child Job that will return the environment
+                  from running all the things in the section, as referenced
+                  outside it. If nothing is referenced, returns None.
 
         :param gather_nodes: Names exposed by these will always be defined
                with something, even if the code that defines them does
@@ -4705,9 +4693,6 @@ class WDLSectionJob(WDLBindingsJob):
 
         # When a WDL node depends on another, we need to be able to find the Toil job we need an rv from.
         wdl_id_to_toil_job: dict[str, WDLBindingsJob] = {}
-        # We need the set of Toil jobs not depended on so we can wire them up to the sink.
-        # This maps from Toil job store ID to job.
-        toil_leaves: dict[str | TemporaryID, WDLBindingsJob] = {}
 
         # We also need this mapping from (source node, variable name) to user
         # nodes, to create cleanup jobs when referenced variables go out of
@@ -4744,6 +4729,9 @@ class WDLSectionJob(WDLBindingsJob):
         creation_jobs = self.coalesce_nodes(creation_order, section_graph)
         logger.debug("Creation jobs: %s", creation_jobs)
 
+        # We're also going to need a list of node IDs that define variables that need to leave the section.
+        externally_referenced_node_ids: set[str] = set()
+
         for node_ids in creation_jobs:
             logger.debug("Make Toil job for %s", node_ids)
             # Collect the return values from previous jobs. Some nodes may have
@@ -4758,10 +4746,6 @@ class WDLSectionJob(WDLBindingsJob):
 
             # Get the Toil jobs we depend on
             prev_jobs = get_job_set_any(prev_node_ids)
-            for prev_job in prev_jobs:
-                if prev_job.jobStoreID in toil_leaves:
-                    # Mark them all as depended on
-                    del toil_leaves[prev_job.jobStoreID]
 
             # Get their return values to feed into the new job
             rvs: list[WDLBindings | Promise] = [prev_job.rv() for prev_job in prev_jobs]
@@ -4785,6 +4769,9 @@ class WDLSectionJob(WDLBindingsJob):
                         kept_variables.add(variable)
                         unresolved_inbound_references.remove(variable)
                         logger.debug("Need to keep resulting variable: %s", variable)
+
+                        # Remember that this node ID exposes an externally-referenced variable.
+                        externally_referenced_node_ids.add(node_id)
                     else:
                         logger.debug("No inbound reference to resulting variable %s", variable)
 
@@ -4820,9 +4807,6 @@ class WDLSectionJob(WDLBindingsJob):
             for node_id in node_ids:
                 # Save the job for everything it executes
                 wdl_id_to_toil_job[node_id] = job
-
-            # It isn't depended on yet by any other workflow stuff
-            toil_leaves[job.jobStoreID] = job
         
         if len(unresolved_inbound_references) > 0:
             # We should have found the nodes that make these variables.
@@ -4848,46 +4832,36 @@ class WDLSectionJob(WDLBindingsJob):
                         # variable.
                         id_job.addFollowOn(cleanup_job)
                         added_predecessor_jobs.add(id_job)
-
-        if len(toil_leaves) == 1:
+        
+        # Get all the Toil jobs that have outputs we need to keep outside the section
+        jobs_with_important_results = get_job_set_any(externally_referenced_node_ids)
+        
+        if len(jobs_with_important_results) == 0:
+            # Nothing is used outside the section
+            return None
+        elif len(jobs_with_important_results) == 1:
             # There's one final node so we can just tack postprocessing onto that.
-            sink: WDLBindingsJob = next(iter(toil_leaves.values()))
+            sink: WDLBindingsJob = next(iter(jobs_with_important_results))
         else:
-            # We need to bring together with a new sink
-            # Make the sink job to collect all their results.
-            leaf_rvs: list[WDLBindings | Promise] = [
-                leaf_job.rv() for leaf_job in toil_leaves.values()
+            # We need to bring multiple jobs together with a new sink
+            important_rvs: list[WDLBindings | Promise] = [
+                important_job.rv() for important_job in jobs_with_important_results
             ]
-            # Make sure to also send the section-level bindings
-            leaf_rvs.append(environment)
             # And to fill in bindings from code not executed in this instantiation
             # with Null, and filter out stuff that should leave scope.
             sink = WDLCombineBindingsJob(
-                leaf_rvs, wdl_options=self._wdl_options, local=True
+                important_rvs, wdl_options=self._wdl_options, local=True
             )
             # It runs inside us
             self.addChild(sink)
-            for leaf_job in toil_leaves.values():
-                # And after all the leaf jobs.
-                leaf_job.addFollowOn(sink)
+            for important_job in jobs_with_important_results:
+                # And after all the jobs it needs to aggregate.
+                important_job.addFollowOn(sink)
 
         logger.debug("Sink job is: %s", sink)
 
-        # TODO: If we don't have all bindings that went into a node come out of
-        # it, and only the ones it actually defines and which are referenced
-        # come out, then we can't use this idea of leaf/sink jobs anymore. We
-        # need to bring together the bindings from all nodes that have anything
-        # referenced and do a bindings combine on them and have that be the
-        # sink for the section.
-
         # Apply the final postprocessing for leaving the section.
         sink.then_underlay(self.make_gather_bindings(gather_nodes, WDL.Value.Null()))
-        if local_environment is not None:
-            sink.then_remove(local_environment)
-
-        # Apply the variable-goes-out-of-scope jobs.
-        # TODO: Batch up the variables with the same set of referers?
-
 
         return sink
 
@@ -5047,7 +5021,19 @@ class WDLScatterJob(WDLSectionJob):
                 list(self._scatter.gathers.values()), empty_array
             )
 
-        # Otherwise we actually have some scatter jobs.
+        # Otherwise we actually have some scattering, but if nothing isd
+        # referenced outside the jobs we get to wait on them might all be None.
+        if None in scatter_jobs:
+            for scatter_job in scatter_jobs:
+                if scatter_job is not None:
+                    # They should either all be None or all be actual jobs
+                    raise RuntimeError("Only some scatter instantiations think they have referenced outputs!")
+
+            # If they're all None we don't actually have anything to output because nothing is referenced.
+            return self.postprocess(WDL.Env.Bindings())
+
+        # Otherwise there's actually stuff referenced.
+        # At this point we know htere are no None valuse in scatter_jobs, but MyPy doesn't.
 
         # Make a job at the end to aggregate.
         # Turn all the bindings created inside the scatter bodies into arrays
@@ -5055,10 +5041,10 @@ class WDLScatterJob(WDLSectionJob):
         # doesn't make as nulls, so we don't have to worry about
         # totally-missing names.
         gather_job = WDLArrayBindingsJob(
-            [j.rv() for j in scatter_jobs], bindings, wdl_options=self._wdl_options
+            [j.rv() for j in cast(list[WDLBindingsJob], scatter_jobs)], bindings, wdl_options=self._wdl_options
         )
         self.addChild(gather_job)
-        for j in scatter_jobs:
+        for j in cast(list[WDLBindingsJob], scatter_jobs):
             j.addFollowOn(gather_job)
         self.defer_postprocessing(gather_job)
         return gather_job.rv()
@@ -5218,8 +5204,13 @@ class WDLConditionalJob(WDLSectionJob):
                 list(self._conditional.gathers.values()),
                 bindings,
             )
-            self.defer_postprocessing(body_job)
-            return body_job.rv()
+            if body_job is not None:
+                # Variables actually leave.
+                self.defer_postprocessing(body_job)
+                return body_job.rv()
+            else:
+                # No data actually leaves.
+                return self.postprocess(WDL.Env.Bindings())
         else:
             logger.info("Condition is false")
             # Return the input bindings and null bindings for all our gathers.
@@ -5333,20 +5324,28 @@ class WDLWorkflowJob(WDLSectionJob):
                     [(p, p) for p in standard_library.get_local_paths()]
                 )
 
+        # TODO: Make inputs go out of scope when not needed
+
         bindings = virtualize_files(bindings, standard_library, enforce_existence=False)
         # Make jobs to run all the parts of the workflow
         sink = self.create_subgraph(self._workflow.body, [], bindings)
+
+        # Section values that aren't used in the outputs will go out of scope
+        # inside the workflow section.
 
         # To support the all call outputs feature, run an outputs job even if
         # we have a declared but empty outputs section.
         outputs_job = WDLOutputsJob(
             self._workflow,
-            sink.rv(),
+            sink.rv() if sink is not None else WDL.Env.Bindings(),
             wdl_options=self._wdl_options,
             cache_key=cache_key,
             local=True,
         )
-        sink.addFollowOn(outputs_job)
+        if sink is not None:
+            sink.addFollowOn(outputs_job)
+        else:
+            self.addChild(outputs_job)
 
         # Outputs that aren't used will go out of scope in the call's parent
         # section.
