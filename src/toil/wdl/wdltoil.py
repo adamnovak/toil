@@ -2970,9 +2970,9 @@ class WDLBindingsJob(WDLBaseJob):
             elif action == "keep_only":
                 if not isinstance(argument, set):
                     raise RuntimeError("Wrong postprocessing argument type")
-                log_bindings(logger.info, "Have bindings", [bindings])
+                log_bindings(logger.debug, "Have bindings", [bindings])
                 bindings = bindings.filter(lambda binding: binding.name in argument)
-                logger.info("Keep variables: %s", argument)
+                logger.debug("Keep variables: %s", argument)
                 # TODO: Bring these officially into scope somehow so WDLVariableOutOfScopeJob can clean up files in them
             elif action == "namespace":
                 if not isinstance(argument, str):
@@ -4873,6 +4873,13 @@ class WDLSectionJob(WDLBindingsJob):
 
         logger.debug("Sink job is: %s", sink)
 
+        # TODO: If we don't have all bindings that went into a node come out of
+        # it, and only the ones it actually defines and which are referenced
+        # come out, then we can't use this idea of leaf/sink jobs anymore. We
+        # need to bring together the bindings from all nodes that have anything
+        # referenced and do a bindings combine on them and have that be the
+        # sink for the section.
+
         # Apply the final postprocessing for leaving the section.
         sink.then_underlay(self.make_gather_bindings(gather_nodes, WDL.Value.Null()))
         if local_environment is not None:
@@ -5383,6 +5390,8 @@ class WDLOutputsJob(WDLBindingsJob):
         Make bindings for the outputs.
         """
         super().run(file_store)
+
+        log_bindings(logger.debug, "Have bindings", [self._bindings])
 
         # Evaluate all output expressions in the normal, non-task-outputs library context
         standard_library = ToilWDLStdLibBase(file_store, self._wdl_options)
