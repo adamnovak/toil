@@ -4148,7 +4148,6 @@ class WDLWorkflowNodeJob(WDLBindingsJob):
                 subjob: WDLBindingsJob = WDLWorkflowJob(
                     self._node.callee,
                     [input_bindings, passed_down_bindings],
-                    self._inbound_references, # TODO: Un-namespace?
                     self._node.callee_id,
                     wdl_options=wdl_options,
                     local=True,
@@ -4217,7 +4216,7 @@ class WDLWorkflowNodeListJob(WDLBindingsJob):
         self,
         nodes: list[WDL.Tree.WorkflowNode],
         prev_node_results: Sequence[Promised[WDLBindings]],
-        inbound_references: Sequence[str],
+        inbound_references: set[str],
         wdl_options: WDLContext,
         **kwargs: Any,
     ) -> None:
@@ -4377,18 +4376,6 @@ class WDLWorkflowGraph:
             if not isinstance(node, WDL.Tree.Gather)
         }
 
-        # Map from nodes to variables they define
-        self._variables = {}
-        for node_id, node in self._nodes.items():
-            if isinstance(node, WDL.Tree.Decl):
-                self._variables[str(node.name)] = node_id
-            elif isinstance(node, WDL.Tree.Call):
-                for binding in node.effective_outputs:
-                    self._variables[binding.name] = node_id
-
-            # TODO: Handle gathers that go down several levels and refer down to the source...
-
-
     def real_id(self, node_id: str) -> str:
         """
         Map multiple IDs for what we consider the same node to one ID.
@@ -4519,7 +4506,7 @@ class WDLWorkflowGraph:
             # Make sure to convert names from WDL tokens to plain strings.
             yield (target_id, str(ident.name))
 
-    def get_all_referees(self) -> collections.defaultdict[tuple[str, str], list[str]]:
+    def get_all_referers(self) -> collections.defaultdict[tuple[str, str], list[str]]:
         """
         Get a mapping from workflow node ID and variable name to all the
         workflow node IDs that refer to that variable.
@@ -4533,7 +4520,7 @@ class WDLWorkflowGraph:
                 # For each thing it references, register it
                 result[reference].append(node_id)
         
-        logger.info("All referees: %s", result)
+        logger.info("All referers: %s", result)
         return result
 
     def get_referables(self, node_id: str) -> Iterator[str]:
@@ -4549,6 +4536,18 @@ class WDLWorkflowGraph:
             for binding in node.effective_outputs:
                 # Calls define all their outputs.
                 yield binding.name
+        elif isinstance(node, WDL.Tree.WorkflowSection):
+            # Sections have the variables from their gathers available to be
+            # referenced.
+            for gather in node.gathers.values():
+                gather_node = gather.final_referee
+                # Handle this like it was the node itself.
+                if isinstance(gather_node, WDL.Tree.Decl):
+                    yield gather_node.name
+                elif isinstance(gather_node, WDL.Tree.Call):
+                    for binding in gather_node.effective_outputs:
+                        yield binding.name
+                        
 
     def get_all_referables(self) -> dict[str, str]:
         """
@@ -4556,7 +4555,7 @@ class WDLWorkflowGraph:
         define them.
         """
 
-        result = {}
+        result: dict[str, str] = {}
 
         for node_id in self._nodes.keys():
             # For each node
@@ -4713,12 +4712,12 @@ class WDLSectionJob(WDLBindingsJob):
         # We also need this mapping from (source node, variable name) to user
         # nodes, to create cleanup jobs when referenced variables go out of
         # scope.
-        variable_to_referees = section_graph.get_all_referees()
+        variable_to_referers = section_graph.get_all_referers()
         
         # Make a map from source node to variable name that actually is
         # referenced later, which we can use to prune down outputs.
         referenced_variables_from = collections.defaultdict(list)
-        for (node_id, variable_name) in variable_to_referees.keys():
+        for (node_id, variable_name) in variable_to_referers.keys():
             referenced_variables_from[node_id].append(variable_name)
 
         def get_job_set_any(wdl_ids: set[str]) -> list[WDLBindingsJob]:
@@ -4738,6 +4737,7 @@ class WDLSectionJob(WDLBindingsJob):
         creation_order = section_graph.topological_order()
         logger.debug("Creation order: %s", creation_order)
         logger.debug("Inbound references: %s", self._inbound_references)
+        unresolved_inbound_references = set(self._inbound_references)
 
         # Now we want to organize the linear list of nodes into collections of
         # nodes that can be in the same Toil job.
@@ -4783,6 +4783,10 @@ class WDLSectionJob(WDLBindingsJob):
                         # Also keep any variables we define in any node that
                         # are needed outside the section.
                         kept_variables.add(variable)
+                        unresolved_inbound_references.remove(variable)
+                        logger.debug("Need to keep resulting variable: %s", variable)
+                    else:
+                        logger.debug("No inbound reference to resulting variable %s", variable)
 
             if len(node_ids) == 1:
                 # Make a one-node job
@@ -4819,9 +4823,12 @@ class WDLSectionJob(WDLBindingsJob):
 
             # It isn't depended on yet by any other workflow stuff
             toil_leaves[job.jobStoreID] = job
+        
+        if len(unresolved_inbound_references) > 0:
+            # We should have found the nodes that make these variables.
+            raise RuntimeError(f"Cound not find sources for inbound references: {unresolved_inbound_references}")
 
-
-        for (var_name, var_source), destination_node_ids in variable_to_referees.items():
+        for (var_name, var_source), destination_node_ids in variable_to_referers.items():
             if var_name not in self._inbound_references:
                 # This variable isn't needed outside of the section.
                 # Add in jobs to clean up variables that ever get referenced, after
@@ -4872,7 +4879,7 @@ class WDLSectionJob(WDLBindingsJob):
             sink.then_remove(local_environment)
 
         # Apply the variable-goes-out-of-scope jobs.
-        # TODO: Batch up the variables with the same set of referees?
+        # TODO: Batch up the variables with the same set of referers?
 
 
         return sink
@@ -5225,7 +5232,6 @@ class WDLWorkflowJob(WDLSectionJob):
         self,
         workflow: WDL.Tree.Workflow,
         prev_node_results: Sequence[Promised[WDLBindings]],
-        inbound_references: Optional[set[str]],
         workflow_id: list[str],
         wdl_options: WDLContext,
         **kwargs: Any,
@@ -5236,30 +5242,30 @@ class WDLWorkflowJob(WDLSectionJob):
 
         :param namespace: the namespace that the workflow's *contents* will be
                in. Caller has already added the workflow's own name.
-
-        :param inbound_references: Set of outputs that must be retained and
-            should not go out of scope on workflow completion. If None, retain
-            all outputs (as for a top-level workflow).
         """
 
+        if workflow.outputs is not None:
+            # The workflow has an outputs section.
+            # Figure out what it needs
+            outputs_references: set[str] = set()
+            # And what it defines
+            outputs_definitions: set[str] = set()
+            for output_decl in workflow.outputs:
+                # Track everything used in the outputs
+                outputs_references.update(str(ident.name) for ident in for_each_ident(output_decl))
+                # And everything defined in the outputs
+                outputs_definitions.add(output_decl.name)
+            
+            # Get only the things used by but not defined in the outputs
+            section_inbound_references = outputs_references.difference(outputs_definitions)
 
-        # Inbound references we got will refer to the outputs section if we
-        # have one, and the outputs section will provide the inbound references
-        # for the body. Without an outputs section we pass the inbound
-        # references directly through.
-        if self.workflow.outputs is not None:
-            # The workflow has an outputs section
-
-            # TODO: Make references from it into the section body
-
-            # TODO: Whan will we make jobs for un-referenced outputs to go out of scope? Right after we compute them?
-
-        if inbound_references is None:
-            # If we don't have any information about outputs being referenced,
-            # we're a top-level workflow and we want to keep all outputs.
-            inbound_references = {binding.name for binding in workflow.effective_outputs}
-
-        super().__init__(inbound_references, wdl_options=wdl_options, **kwargs)
+        else:
+            # Without an outputs section, treat everything as referenced. It
+            # will go away at the WorkflowNode calling the workflow, if it
+            # doesn't get used by the call's enclosing section. 
+            section_inbound_references = {binding.name for binding in workflow.effective_outputs}
+            
+        super().__init__(section_inbound_references, wdl_options=wdl_options, **kwargs)
 
         # Because we need to return the return value of the workflow, we need
         # to return a Toil promise for the last/sink job in the workflow's
@@ -5269,7 +5275,7 @@ class WDLWorkflowJob(WDLSectionJob):
         # workflow in run().
 
         logger.debug("Preparing to run workflow %s", workflow.name)
-        logger.debug("Will retain outputs: %s", inbound_references)
+        logger.debug("Will retain section results: %s", section_inbound_references)
 
         self._workflow = workflow
         self._prev_node_results = prev_node_results
@@ -5334,6 +5340,10 @@ class WDLWorkflowJob(WDLSectionJob):
             local=True,
         )
         sink.addFollowOn(outputs_job)
+
+        # Outputs that aren't used will go out of scope in the call's parent
+        # section.
+
         # Caller is responsible for making sure namespaces are applied
         self.defer_postprocessing(outputs_job)
         return outputs_job.rv()
@@ -5495,7 +5505,6 @@ class WDLStartJob(WDLBindingsJob):
             job: WDLBindingsJob = WDLWorkflowJob(
                 self._target,
                 [inputs],
-                None, # Keep all outputs
                 [self._target.name],
                 wdl_options=self._wdl_options,
                 local=True,
