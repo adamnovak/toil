@@ -2840,6 +2840,16 @@ def ensure_null_files_are_nullable(
         return
 
 
+def add_namespace(namespace: str, name: str) -> str:
+    """
+    Add a nonempty namespace to the given name, or return it unmodified.
+    """
+
+    if namespace:
+        return ".".join([namespace, name])
+    else:
+        return name
+
 class WDLBaseJob(Job):
     """
     Base job class for all WDL-related jobs.
@@ -4510,53 +4520,17 @@ class WDLWorkflowGraph:
         logger.info("All referers: %s", result)
         return result
 
-    def get_referables(self, node_id: str) -> Iterator[str]:
+    def get_referables(self, node_id: str, all_call_outputs: bool) -> Iterator[str]:
         """
         Get all variable names potentially defined by the given node ID.
+
+        :param all_call_outputs: If True, include all outputs of calls,
+            recursively.
         """
         
         node = self.get(node_id)
-        if isinstance(node, WDL.Tree.Decl):
-            # Decls define their variables
-            yield node.name
-        elif isinstance(node, WDL.Tree.Call):
-            for binding in node.effective_outputs:
-                # Calls define all their outputs.
-                yield binding.name
-        elif isinstance(node, WDL.Tree.WorkflowSection):
-            # Sections have the variables from their gathers available to be
-            # referenced.
-            for gather in node.gathers.values():
-                gather_node = gather.final_referee
-                # Handle this like it was the node itself.
-                if isinstance(gather_node, WDL.Tree.Decl):
-                    yield gather_node.name
-                elif isinstance(gather_node, WDL.Tree.Call):
-                    for binding in gather_node.effective_outputs:
-                        yield binding.name
-                        
 
-    def get_all_referables(self) -> dict[str, str]:
-        """
-        Get a mapping from varible names to the node IDs for the nodes that can
-        define them.
-        """
-
-        result: dict[str, str] = {}
-
-        for node_id in self._nodes.keys():
-            # For each node
-            for referable in self.get_referables(node_id):
-                # For each thing it defines, register it
-                if referable in result:
-                    # We should have already checked for duplicate definitions.
-                    # Something is wrong with our understanding of MiniWDL's
-                    # object graph.
-                    raise RuntimeError(f"Definition for {referable} in {node_id} would be a duplicate with {result[referable]}")
-                result[referable] = node_id
-
-        logger.info("All referables: %s", result)
-        return result
+        yield from get_definitions_in(node, "", include_decls=True, all_call_outputs=all_call_outputs)
 
 class WDLSectionJob(WDLBindingsJob):
     """
@@ -4762,7 +4736,7 @@ class WDLSectionJob(WDLBindingsJob):
                     # section.
                     kept_variables.add(variable_name)
             for node_id in node_ids:
-                for variable in section_graph.get_referables(node_id):
+                for variable in section_graph.get_referables(node_id, self._wdl_options.get("all_call_outputs", False)):
                     if variable in self._inbound_references:
                         # Also keep any variables we define in any node that
                         # are needed outside the section.
@@ -5221,6 +5195,40 @@ class WDLConditionalJob(WDLSectionJob):
             return self.postprocess(combine_bindings([bindings, gather_bindings]))
 
 
+def get_definitions_in(node: WDL.Tree.WorkflowNode, namespace: str, include_decls: bool = False, all_call_outputs: bool = False) -> set[str]:
+    """
+    Get all the names of variables defined in the given WorkflowNode.
+
+    :param namespace: Apply the given namespace to every definition if
+        nonempty.
+    :param include_decls: Include Decl variables and not just call outputs.
+    :param all_call_outputs: Include all outputs of calls, recursively.
+    """
+
+    result: set[str] = set()
+
+    if isinstance(node, WDL.Tree.Decl):
+        if include_decls:
+            # Decls define their variables.
+            result.add(add_namespace(namespace, node.name))
+    elif isinstance(node, WDL.Tree.Call):
+        for binding in node.effective_outputs:
+            # Calls define all their outputs.
+            result.add(add_namespace(namespace, binding.name))
+        if all_call_outputs and isinstance(node.callee, WDL.Tree.Workflow):
+            for subnode in node.callee.body:
+                # Go get more call outputs out of the workflow body
+                result.update(get_definitions_in(subnode, add_namespace(namespace, node.name), include_decls, all_call_outputs))
+    elif isinstance(node, WDL.Tree.WorkflowSection):
+        # It's a scatter or conditional, and has a body.
+        for subnode in node.body:
+            # Recurse into the node, which doesn't make its own namespace. 
+            # TODO: We might like to use gathers here, but we won't have those
+            # for the extra all_call_outputs call outputs.
+            result.update(get_definitions_in(subnode, namespace, include_decls, all_call_outputs))
+   
+    return result
+
 class WDLWorkflowJob(WDLSectionJob):
     """
     Job that evaluates an entire WDL workflow.
@@ -5242,26 +5250,45 @@ class WDLWorkflowJob(WDLSectionJob):
                in. Caller has already added the workflow's own name.
         """
 
+        # Track the variable names of outputs to kick up to the enclosing section.
+        # This keeps track of whether we have an outputs section or whether we
+        # just dump our call outputs.
+        normal_output_set = {binding.name for binding in workflow.effective_outputs}
+        # If we're in all_call_outputs mode, we'll also need to propagate call
+        # outputs that weren't in out outputs section or our MiniWDL-determined
+        # effective outputs.
+        extra_output_set: set[str] = set()
+
+        if wdl_options.get("all_call_outputs", False):
+            for subnode in workflow.body:
+                # Go get more call outputs out of the workflow body
+                extra_output_set.update(get_definitions_in(subnode, "", all_call_outputs=True))
+
+        # Make sure we didn't get any normal outputs as extra outputs, which
+        # will happen if we don't have an outputs section.
+        extra_output_set = extra_output_set.difference(normal_output_set)
+
         if workflow.outputs is not None:
             # The workflow has an outputs section.
             # Figure out what it needs
             outputs_references: set[str] = set()
-            # And what it defines
-            outputs_definitions: set[str] = set()
+            # And what's defined there
+            outputs_defines: set[str] = set()
             for output_decl in workflow.outputs:
                 # Track everything used in the outputs
                 outputs_references.update(str(ident.name) for ident in for_each_ident(output_decl))
-                # And everything defined in the outputs
-                outputs_definitions.add(output_decl.name)
-            
-            # Get only the things used by but not defined in the outputs
-            section_inbound_references = outputs_references.difference(outputs_definitions)
+                outputs_defines.add(output_decl.name)
 
+            # From the section, we need the things used by but not defined in the outputs
+            section_inbound_references = outputs_references.difference(outputs_defines)
         else:
             # Without an outputs section, treat everything as referenced. It
             # will go away at the WorkflowNode calling the workflow, if it
             # doesn't get used by the call's enclosing section. 
-            section_inbound_references = {binding.name for binding in workflow.effective_outputs}
+            section_inbound_references = set(normal_output_set)
+
+        # Any extra outputs need to come from the section
+        section_inbound_references.update(extra_output_set)
             
         super().__init__(section_inbound_references, wdl_options=wdl_options, **kwargs)
 
@@ -5274,10 +5301,12 @@ class WDLWorkflowJob(WDLSectionJob):
 
         logger.debug("Preparing to run workflow %s", workflow.name)
         logger.debug("Will retain section results: %s", section_inbound_references)
+        logger.debug("Will expose normal outputs: %s", normal_output_set)
 
         self._workflow = workflow
         self._prev_node_results = prev_node_results
         self._workflow_id = workflow_id
+        self._extra_outputs = extra_output_set
 
     @report_wdl_errors("run workflow")
     def run(self, file_store: AbstractFileStore) -> Promised[WDLBindings]:
@@ -5299,16 +5328,23 @@ class WDLWorkflowJob(WDLSectionJob):
         # Combine the bindings we get from previous jobs.
         bindings = combine_bindings(unwrap_all(self._prev_node_results))
 
-        # At this point we have what MiniWDL would call the "inputs" to the
-        # call (i.e. what you would put in a JSON file, without any defaulted
-        # or calculated inputs filled in).
-        cached_result, cache_key = poll_execution_cache(self._workflow, bindings)
-        if cached_result is not None:
-            return self.postprocess(
-                virtualize_files(
-                    cached_result, standard_library, enforce_existence=False
+        if not self._wdl_options.get("all_call_outputs", False):
+            # Workflow caching can only be on if we're saving all call outputs
+            # as workflow outputs. We don't have a place for the flag in the
+            # cache key. TODO: Add it!
+
+            # At this point we have what MiniWDL would call the "inputs" to the
+            # call (i.e. what you would put in a JSON file, without any defaulted
+            # or calculated inputs filled in).
+            cached_result, cache_key = poll_execution_cache(self._workflow, bindings)
+            if cached_result is not None:
+                return self.postprocess(
+                    virtualize_files(
+                        cached_result, standard_library, enforce_existence=False
+                    )
                 )
-            )
+        else:
+            cache_key = None
 
         if self._workflow.inputs:
             try:
@@ -5338,6 +5374,7 @@ class WDLWorkflowJob(WDLSectionJob):
         outputs_job = WDLOutputsJob(
             self._workflow,
             sink.rv() if sink is not None else WDL.Env.Bindings(),
+            self._extra_outputs,
             wdl_options=self._wdl_options,
             cache_key=cache_key,
             local=True,
@@ -5366,6 +5403,7 @@ class WDLOutputsJob(WDLBindingsJob):
         self,
         workflow: WDL.Tree.Workflow,
         bindings: Promised[WDLBindings],
+        extra_outputs: set[str],
         wdl_options: WDLContext,
         cache_key: str | None = None,
         **kwargs: Any,
@@ -5373,14 +5411,18 @@ class WDLOutputsJob(WDLBindingsJob):
         """
         Make a new WDLWorkflowOutputsJob for the given workflow, with the given set of bindings after its body runs.
 
+        :param extra_outputs: Set of extra output names to expose from the body
+            section.
+
         :param cache_key: If set and storing into the call cache is on, will
                cache the workflow execution result under the given key in a
                MiniWDL-compatible way.
         """
         super().__init__(wdl_options=wdl_options, **kwargs)
 
-        self._bindings = bindings
         self._workflow = workflow
+        self._bindings = bindings
+        self._extra_outputs = extra_outputs
         self._cache_key = cache_key
 
     @report_wdl_errors("evaluate outputs")
@@ -5407,50 +5449,13 @@ class WDLOutputsJob(WDLBindingsJob):
                 # If no output section is present, start with an empty bindings
                 output_bindings = WDL.Env.Bindings()
 
-            if self._workflow.outputs is None or self._wdl_options.get(
-                "all_call_outputs", False
-            ):
-                # The output section is not declared, or we want to keep task outputs anyway.
-
-                # Get all task outputs and return that
-                # First get all task output names
-                output_set = set()
-                # We need to recurse down through scatters and conditionals to find all the task names.
-                # The output variable names won't involve the scatters or conditionals as components.
-                stack = list(self._workflow.body)
-                while stack != []:
-                    node = stack.pop()
-                    if isinstance(node, WDL.Tree.Call):
-                        # For calls, promote all output names to workflow output names
-                        # TODO: Does effective_outputs already have the right
-                        # stuff for calls to workflows that themselves lack
-                        # output sections? If so, can't we just use that for
-                        # *this* workflow?
-                        for type_binding in node.effective_outputs:
-                            output_set.add(type_binding.name)
-                    elif isinstance(node, WDL.Tree.Scatter) or isinstance(
-                        node, WDL.Tree.Conditional
-                    ):
-                        # For scatters and conditionals, recurse looking for calls.
-                        for subnode in node.body:
-                            stack.append(subnode)
-                # Collect all bindings that are task outputs
-                for binding in unwrap(self._bindings):
-                    if binding.name in output_set:
-                        # The bindings will already be namespaced with the task namespaces
-                        output_bindings = output_bindings.bind(
-                            binding.name, binding.value
-                        )
-            else:
-                # Output section is declared and is nonempty, so evaluate normally
-
-                # Combine the bindings from the previous job
-                output_bindings = evaluate_decls_to_bindings(
-                    self._workflow.outputs,
-                    unwrap(self._bindings),
-                    standard_library,
-                    drop_missing_files=True,
-                )
+            # Add in any extra outputs to expose from the body
+            for binding in unwrap(self._bindings):
+                if binding.name in self._extra_outputs:
+                    # The bindings will already be namespaced with the task namespaces
+                    output_bindings = output_bindings.bind(
+                        binding.name, binding.value
+                    )
         finally:
             # We don't actually know when all our files are downloaded since
             # anything we evaluate might devirtualize inside any expression.
