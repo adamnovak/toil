@@ -69,6 +69,11 @@ WALLTIME_EXIT_CODE = 77
 # Should be a signal that shouldn't arrive for other reasons.
 WALLTIME_SIGNAL = signal.SIGUSR2
 
+# Environment variable a batch system can set to tell the worker how much
+# walltime it really allocated, which can be more than the job asked for.
+# A value of 0 means the worker has unlimited time.
+ALLOCATED_WALLTIME_ENV = "TOIL_ALLOCATED_WALLTIME"
+
 # When a walltime signal arrives, we set this.
 _walltime_expired = False
 
@@ -82,6 +87,23 @@ def handle_walltime_signal(signal_number: int, frame: Any) -> None:
     global _walltime_expired
     _walltime_expired = True
     raise KeyboardInterrupt()
+
+
+def get_allocated_walltime(job_desc: JobDescription) -> int:
+    """
+    Get the seconds of walltime the batch system gave this worker, with 0
+    meaning unlimited.
+
+    This can be more than the job asked for, so a chain of jobs each wanting
+    the same walltime can still run in one worker.
+
+    :param job_desc: The first job the worker was given.
+    """
+    allocated = os.environ.get(ALLOCATED_WALLTIME_ENV)
+    if allocated is None:
+        # A batch system that doesn't say leaves us only what we asked for.
+        return job_desc.walltime
+    return int(allocated)
 
 
 def nextChainable(
@@ -583,9 +605,9 @@ def workerScript(
         startClock = ResourceMonitor.get_total_cpu_time()
 
         startTime = time.time()
-        # Remember the walltime from the first job too. The batch system gave
-        # us that for the whole chain, not for each job in it.
-        chainWalltime = jobDesc.walltime
+        # Remember the walltime we got for the whole chain, which is not
+        # necessarily what the first job asked for.
+        chainWalltime = get_allocated_walltime(jobDesc)
         fileStore = None
         while True:
             ##########################################
