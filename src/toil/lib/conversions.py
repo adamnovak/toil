@@ -107,7 +107,7 @@ def parse_unit_string(
 
     Parse a number with units (i.e. '1024 Mib').
 
-    :returns: the number and unit.
+    :returns: the number, and the unit in lower case.
 
     :param allowed_units: collection that all the allowed units are ``in``.
     :param default_unit: unit to return when no unit is in the input.
@@ -115,8 +115,8 @@ def parse_unit_string(
     for i, character in enumerate(string):
         # find the first character of the unit
         if character not in "0123456789.-_ ":
-            units = string[i:].strip()
-            if not units.lower() in allowed_units:
+            units = string[i:].strip().lower()
+            if not units in allowed_units:
                 raise RuntimeError(
                     f"{units} not a valid unit, valid units are {allowed_units}."
                 )
