@@ -13,7 +13,14 @@
 # limitations under the License.
 import logging
 
-from toil.lib.conversions import convert_units, hms_duration_to_seconds, human2bytes
+import pytest
+
+from toil.lib.conversions import (
+    convert_units,
+    hms_duration_to_seconds,
+    human2bytes,
+    human2seconds,
+)
 from toil.test import ToilTest
 
 logger = logging.getLogger(__name__)
@@ -195,6 +202,27 @@ class ConversionTest(ToilTest):
             for src_unit in ["b", "Ki", "Mi", "Gi", "Ti", "K", "M", "G", "T"]:
                 results[f"{i} {src_unit}"] = human2bytes(f"{i} {src_unit}")
         self.assertEqual(results, expected_results)
+
+    def test_human2seconds(self):
+        expected_results = {
+            "0": 0,
+            "3s": 3,
+            "5m": 300,
+            "4h": 14400,
+            "1d": 86400,
+            "120": 120,
+            "2.5h": 9000,
+            "30 m": 1800,
+            "1D": 86400,
+            # Round up, so that a fractional second is not lost off a limit
+            "0.5s": 1,
+        }
+        results = {key: human2seconds(key) for key in expected_results}
+        assert results == expected_results
+
+    def test_human2seconds_bad_unit(self):
+        with pytest.raises(RuntimeError):
+            human2seconds("4x")
 
     def test_hms_duration_to_seconds(self):
         expected_results = {

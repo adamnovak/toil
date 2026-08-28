@@ -157,6 +157,39 @@ def mib_to_b(n: int | float) -> float:
 # General Conversions
 
 
+# Suffixes understood for durations, and the seconds in each.
+SECONDS_IN_UNIT = {"s": 1, "m": 60, "h": 60 * 60, "d": 60 * 60 * 24}
+
+
+def parse_duration_string(string: str) -> tuple[float, str]:
+    """
+    Given a string representation of a duration (i.e. '4 h'), return the number
+    and unit. A duration with no unit is in seconds.
+    """
+    for i, character in enumerate(string):
+        # find the first character of the unit
+        if character not in "0123456789.-_ ":
+            unit = string[i:].strip().lower()
+            if unit not in SECONDS_IN_UNIT:
+                raise RuntimeError(
+                    f"{unit} not a valid unit, valid units are {list(SECONDS_IN_UNIT)}."
+                )
+            return float(string[:i]), unit
+    return float(string), "s"
+
+
+def human2seconds(string: str) -> int:
+    """
+    Given a string representation of a duration (i.e. '4h'), return the integer
+    number of seconds.
+    """
+    value, unit = parse_duration_string(string)
+
+    # Round up, because a time limit that is short by a fraction of a second
+    # would cut the job off early.
+    return math.ceil(value * SECONDS_IN_UNIT[unit])
+
+
 def hms_duration_to_seconds(hms: str) -> float:
     """
     Parses a given time string in hours:minutes:seconds,

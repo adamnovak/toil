@@ -8,7 +8,13 @@ from configargparse import SUPPRESS
 from ruamel.yaml import YAML
 
 from toil.batchSystems.options import add_all_batchsystem_options
-from toil.lib.conversions import bytes2human, human2bytes, opt_strtobool, strtobool
+from toil.lib.conversions import (
+    bytes2human,
+    human2bytes,
+    human2seconds,
+    opt_strtobool,
+    strtobool,
+)
 from toil.provisioners import parse_node_types
 from toil.statsAndLogging import add_logging_options
 
@@ -758,7 +764,7 @@ def add_base_toil_options(
     )
     cpu_note = "Fractions of a core (for example 0.1) are supported on some batch systems [mesos, single_machine]"
     disk_mem_note = "Standard suffixes like K, Ki, M, Mi, G or Gi are supported"
-    walltime_note = "Values are assumed to be in seconds. A value of 0 does not limit the walltime"
+    walltime_note = "Suffixes s, m, h and d are supported, and a bare number is seconds. A value of 0 does not limit the walltime"
     accelerators_note = (
         "Each accelerator specification can have a type (gpu [default], nvidia, amd, cuda, rocm, opencl, "
         "or a specific model like nvidia-tesla-k80), and a count [default: 1]. If both a type and a count "
@@ -853,7 +859,7 @@ def add_base_toil_options(
         "--defaultWalltime",
         dest="defaultWalltime",
         default="0",
-        type=int,
+        type=human2seconds,
         action=make_open_interval_action(0),
         help=resource_help_msg.format(
             "default", "walltime", walltime_note, str(0)

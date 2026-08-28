@@ -68,7 +68,12 @@ from toil.common import Config, Toil, addOptions, safeUnpickleFromStream
 from toil.deferred import DeferredFunction
 from toil.fileStores import FileID
 from toil.lib.compatibility import deprecated
-from toil.lib.conversions import bytes2human, human2bytes, seconds_to_dhms
+from toil.lib.conversions import (
+    bytes2human,
+    human2bytes,
+    human2seconds,
+    seconds_to_dhms,
+)
 from toil.lib.exceptions import UnimplementedURLException
 from toil.lib.expando import Expando
 from toil.lib.resources import ResourceMonitor
@@ -612,11 +617,14 @@ class Requirer:
             return value
 
         if name in ("memory", "disk", "cores", "walltime"):
-            # These should be numbers that accept things like "5G".
+            # These should be numbers that accept units, like "5G" or "4h".
             if isinstance(value, bytes):
                 value = value.decode("utf-8")
             if isinstance(value, str):
-                value = human2bytes(value)
+                # Walltimes are durations and everything else is a size.
+                value = (
+                    human2seconds(value) if name == "walltime" else human2bytes(value)
+                )
             if isinstance(value, int):
                 return value
             elif isinstance(value, float) and name == "cores":
