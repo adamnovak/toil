@@ -642,7 +642,7 @@ class Requirer:
                 return cast(ParsedRequirement, value)
             else:
                 raise TypeError(
-                    f"The '{name}' requirement can't be a {type(value)}, try a {', a '.join(str(t) for t in type_list)}, or a string like '{example}'."
+                    f"The '{name}' requirement can't be of type {type(value)}, try a {', a '.join(t.__name__ for t in type_list)}, or a string like '{example}'."
                 )
         elif name == "preemptible":
             if isinstance(value, str):
