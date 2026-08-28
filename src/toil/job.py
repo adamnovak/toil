@@ -40,6 +40,7 @@ from typing import (
     Literal,
     NamedTuple,
     NoReturn,
+    Type,
     TypedDict,
     TypeVar,
     Union,
@@ -265,7 +266,7 @@ def parse_accelerator(
     APIS = {"cuda", "rocm", "opencl"}
 
     parsed: AcceleratorRequirement = {"count": 1, "kind": "gpu"}
-    
+
     if isinstance(spec, bytes):
         spec = spec.decode("utf-8")
     if isinstance(spec, int):
@@ -616,23 +617,32 @@ class Requirer:
             # Anything can be None.
             return value
 
-        if name in ("memory", "disk", "cores", "walltime"):
-            # These should be numbers that accept units, like "5G" or "4h".
-            if isinstance(value, bytes):
-                value = value.decode("utf-8")
+        if isinstance(value, bytes):
+            # Nothing can be bytes
+            value = value.decode("utf-8")
+
+        # For the easy requirements, have a parser function, a list of allowed
+        # types, and an example string.
+        SpecType = tuple[Callable[[str], ParsedRequirement], list[Type[ParsedRequirement]], str]
+        SPACE_SPEC: SpecType = (human2bytes, [int], "4GiB")
+        SPECS: dict[str, SpecType]  = {
+            "memory": SPACE_SPEC,
+            "disk": SPACE_SPEC,
+            "walltime": (human2seconds, [int], "2h"),
+            "cores": (float, [int, float], "1.5")
+        }
+
+        if name in SPECS:
+            parser, type_list, example = SPECS[name]
             if isinstance(value, str):
-                # Walltimes are durations and everything else is a size.
-                value = (
-                    human2seconds(value) if name == "walltime" else human2bytes(value)
-                )
-            if isinstance(value, int):
-                return value
-            elif isinstance(value, float) and name == "cores":
-                # But only cores can be fractional.
-                return value
+                value = parser(value)
+            if isinstance(value, tuple(type_list)):
+                # TODO: MyPy can't tell that this means value must be a
+                # ParsedRequirement
+                return cast(ParsedRequirement, value)
             else:
                 raise TypeError(
-                    f"The '{name}' requirement does not accept values that are of type {type(value)}"
+                    f"The '{name}' requirement can't be a {type(value)}, try a {', a '.join(str(t) for t in type_list)}, or a string like '{example}'."
                 )
         elif name == "preemptible":
             if isinstance(value, str):
@@ -1490,7 +1500,7 @@ class JobDescription(Requirer):
                 self.jobStoreID,
             )
         else:
-            self.chargeRetry() 
+            self.chargeRetry()
             logger.warning(
                 "Due to failure we are reducing the remaining try count of job %s with ID %s to %s",
                 self,
@@ -1980,7 +1990,7 @@ class Job:
     def preemptible(self) -> bool:
         """Whether the job can be run on a preemptible node."""
         return self.description.preemptible
-    
+
     @preemptible.setter
     def preemptible(self, val: bool) -> None:
         self.description.preemptible = val
@@ -2200,7 +2210,7 @@ class Job:
 
     # Convenience functions for creating jobs
 
-    
+
     # TODO: We want to take the Callable here, and accept all its arguments and
     # keyword arguments *plus* the extra Toil keyword arguments the job types
     # have, and also we need promised versions of the arguments to be allowed,
@@ -3379,7 +3389,7 @@ class Job:
                         succeeded=str(succeeded),
                     )
                 )
-    
+
 
     def _check_cpu_usage(
         self,
