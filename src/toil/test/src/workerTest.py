@@ -141,3 +141,53 @@ class WorkerTests(ToilTest):
             chainable = nextChainable(jobDesc1, self.jobStore, self.config)
             self.assertNotEqual(chainable, None)
             self.assertEqual(chainable.jobStoreID, jobDesc2.jobStoreID)
+
+    def _walltime_job_desc(self, walltime):
+        """
+        Create a saved JobDescription with no command and the given walltime.
+        """
+        self.jobNumber += 1
+        jobDesc = JobDescription(
+            requirements={
+                "memory": 1,
+                "cores": 2,
+                "disk": 3,
+                "preemptible": True,
+                "walltime": walltime,
+            },
+            jobName="job%d" % self.jobNumber,
+        )
+        self.jobStore.assign_job_id(jobDesc)
+        return self.jobStore.create_job(jobDesc)
+
+    def test_nextChainable_walltime_fits_in_remaining(self):
+        predecessor = self._walltime_job_desc(100)
+        successor = self._walltime_job_desc(30)
+        predecessor.addChild(successor.jobStoreID)
+
+        chainable = nextChainable(predecessor, self.jobStore, self.config, 60)
+        assert chainable is not None
+        assert chainable.jobStoreID == successor.jobStoreID
+
+    def test_nextChainable_walltime_exceeds_remaining(self):
+        predecessor = self._walltime_job_desc(100)
+        successor = self._walltime_job_desc(90)
+        predecessor.addChild(successor.jobStoreID)
+
+        assert nextChainable(predecessor, self.jobStore, self.config, 60) is None
+
+    def test_nextChainable_walltime_unlimited_successor(self):
+        predecessor = self._walltime_job_desc(100)
+        successor = self._walltime_job_desc(0)
+        predecessor.addChild(successor.jobStoreID)
+
+        assert nextChainable(predecessor, self.jobStore, self.config, 60) is None
+
+    def test_nextChainable_walltime_unlimited_remaining(self):
+        predecessor = self._walltime_job_desc(100)
+        successor = self._walltime_job_desc(90)
+        predecessor.addChild(successor.jobStoreID)
+
+        chainable = nextChainable(predecessor, self.jobStore, self.config, None)
+        assert chainable is not None
+        assert chainable.jobStoreID == successor.jobStoreID

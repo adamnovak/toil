@@ -85,7 +85,10 @@ def handle_walltime_signal(signal_number: int, frame: Any) -> None:
 
 
 def nextChainable(
-    predecessor: JobDescription, job_store: AbstractJobStore, config: Config
+    predecessor: JobDescription,
+    job_store: AbstractJobStore,
+    config: Config,
+    remaining_walltime: float | None = None,
 ) -> JobDescription | None:
     """
     Returns the next chainable job's JobDescription after the given predecessor
@@ -94,6 +97,8 @@ def nextChainable(
     :param predecessor: The job to chain from
     :param job_store: The JobStore to fetch JobDescriptions from.
     :param config: The configuration for the current run.
+    :param remaining_walltime: Seconds left of the walltime the batch system
+        gave us, or None if it did not give us a limited amount.
     """
     # If no more jobs to run or services not finished, quit
     if (
@@ -151,6 +156,14 @@ def nextChainable(
         return None
     if successor.disk > predecessor.disk:
         logger.debug("We need more disk for the next job, so finishing")
+        return None
+    if remaining_walltime is not None and (
+        successor.walltime == 0 or successor.walltime > remaining_walltime
+    ):
+        # All we have is what is left of the walltime the first job in the
+        # chain asked for. Nobody reserved the successor's walltime for us on
+        # top of that, and a successor that wants unlimited time never fits.
+        logger.debug("Not enough time is left for the next job, so finishing")
         return None
     if successor.preemptible != predecessor.preemptible:
         logger.debug(
@@ -570,6 +583,9 @@ def workerScript(
         startClock = ResourceMonitor.get_total_cpu_time()
 
         startTime = time.time()
+        # Remember the walltime from the first job too. The batch system gave
+        # us that for the whole chain, not for each job in it.
+        chainWalltime = jobDesc.walltime
         fileStore = None
         while True:
             ##########################################
@@ -649,7 +665,14 @@ def workerScript(
             ##########################################
             # Establish if we can run another job within the worker
             ##########################################
-            successor = nextChainable(jobDesc, job_store, config)
+            # We measure from when the worker started, which is a bit after
+            # the batch system started counting, so this is an overestimate.
+            remaining_walltime = (
+                None
+                if chainWalltime == 0
+                else chainWalltime - (time.time() - startTime)
+            )
+            successor = nextChainable(jobDesc, job_store, config, remaining_walltime)
             if successor is None or config.disableChaining:
                 # Can't chain any more jobs. We are going to stop.
 
