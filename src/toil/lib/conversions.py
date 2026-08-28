@@ -6,6 +6,7 @@ Also contains general conversion functions
 import math
 import urllib.parse
 from typing import SupportsInt
+from collections.abc import Collection
 
 KIB = 1024
 MIB = 1024**2
@@ -97,21 +98,30 @@ def convert_units(num: float, src_unit: str, dst_unit: str = "B") -> float:
     return (num * bytes_in_unit(src_unit)) / bytes_in_unit(dst_unit)
 
 
-def parse_memory_string(string: str) -> tuple[float, str]:
+def parse_unit_string(
+    string: str,
+    allowed_units: Collection[str],
+    default_unit: str
+) -> tuple[float, str]:
     """
-    Given a string representation of some memory (i.e. '1024 Mib'), return the
-    number and unit.
+
+    Parse a number with units (i.e. '1024 Mib').
+
+    :returns: the number and unit.
+
+    :param allowed_units: collection that all the allowed units are ``in``.
+    :param default_unit: unit to return when no unit is in the input.
     """
     for i, character in enumerate(string):
         # find the first character of the unit
         if character not in "0123456789.-_ ":
             units = string[i:].strip()
-            if not units.lower() in VALID_PREFIXES:
+            if not units.lower() in allowed_units:
                 raise RuntimeError(
-                    f"{units} not a valid unit, valid units are {VALID_PREFIXES}."
+                    f"{units} not a valid unit, valid units are {allowed_units}."
                 )
             return float(string[:i]), units
-    return float(string), "b"
+    return float(string), default_unit
 
 
 def human2bytes(string: str) -> int:
@@ -119,7 +129,7 @@ def human2bytes(string: str) -> int:
     Given a string representation of some memory (i.e. '1024 Mib'), return the
     integer number of bytes.
     """
-    value, unit = parse_memory_string(string)
+    value, unit = parse_unit_string(string, VALID_PREFIXES, "b")
 
     return int(convert_units(value, src_unit=unit, dst_unit="b"))
 
@@ -160,30 +170,12 @@ def mib_to_b(n: int | float) -> float:
 # Suffixes understood for durations, and the seconds in each.
 SECONDS_IN_UNIT = {"s": 1, "m": 60, "h": 60 * 60, "d": 60 * 60 * 24}
 
-
-def parse_duration_string(string: str) -> tuple[float, str]:
-    """
-    Given a string representation of a duration (i.e. '4 h'), return the number
-    and unit. A duration with no unit is in seconds.
-    """
-    for i, character in enumerate(string):
-        # find the first character of the unit
-        if character not in "0123456789.-_ ":
-            unit = string[i:].strip().lower()
-            if unit not in SECONDS_IN_UNIT:
-                raise RuntimeError(
-                    f"{unit} not a valid unit, valid units are {list(SECONDS_IN_UNIT)}."
-                )
-            return float(string[:i]), unit
-    return float(string), "s"
-
-
 def human2seconds(string: str) -> int:
     """
     Given a string representation of a duration (i.e. '4h'), return the integer
     number of seconds.
     """
-    value, unit = parse_duration_string(string)
+    value, unit = parse_unit_string(string, SECONDS_IN_UNIT.keys(), "s")
 
     # Round up, because a time limit that is short by a fraction of a second
     # would cut the job off early.
