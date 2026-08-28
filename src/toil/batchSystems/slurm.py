@@ -39,7 +39,7 @@ from toil.job import JobDescription, Requirer
 from toil.lib.conversions import strtobool
 from toil.lib.misc import CalledProcessErrorStderr, call_command
 from toil.statsAndLogging import TRACE
-from toil.worker import WALLTIME_EXIT_CODE, WALLTIME_SIGNAL
+from toil.worker import TOIL_WORKER_TIME_LIMIT, WALLTIME_EXIT_CODE, WALLTIME_SIGNAL
 
 logger = logging.getLogger(__name__)
 
@@ -960,6 +960,11 @@ class SlurmBatchSystem(AbstractGridEngineBatchSystem):
                         # Other arguments pass through.
                         sbatch_line.append(arg)
                     i += 1
+
+            if time_limit and time_limit > 0:
+                # Tell the worker when Slurm will stop it, so it knows how much
+                # room it has to chain jobs.
+                environment[TOIL_WORKER_TIME_LIMIT] = str(time_limit)
 
             if export_all:
                 # We don't have any export overrides so we ened to start with

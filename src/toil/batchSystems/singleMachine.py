@@ -915,9 +915,6 @@ class SingleMachineBatchSystem(BatchSystemSupport):
         environment = self.environment.copy()
         if job_environment:
             environment.update(job_environment)
-        # We never stop a job for taking too long, so tell the worker it has
-        # all the time it wants and can chain as far as it likes.
-        environment[toil_worker.ALLOCATED_WALLTIME_ENV] = "0"
 
         if self.debugWorker:
             # Run immediately, blocking for return.

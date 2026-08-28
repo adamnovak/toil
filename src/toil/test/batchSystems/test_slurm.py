@@ -15,6 +15,7 @@ from toil.batchSystems.abstractBatchSystem import (
     BatchSystemSupport,
 )
 from toil.common import Config
+from toil.worker import TOIL_WORKER_TIME_LIMIT
 from toil.lib.misc import CalledProcessErrorStderr
 from toil.worker import WALLTIME_SIGNAL, WALLTIME_EXIT_CODE
 
@@ -725,24 +726,46 @@ class SlurmTest(ToilTest):
         assert "--partition=medium" in command
         assert "--time=0:36000" in command
 
+    def test_prepareSbatch_time_limit_in_environment(self):
+        self.monkeypatch.setattr(toil.batchSystems.slurm, "call_command", call_sinfo)
+        self.worker.boss.partitions = (
+            toil.batchSystems.slurm.SlurmBatchSystem.PartitionSet()
+        )
+
+        # With a time limit, the worker is told when Slurm will stop it.
+        self.worker.boss.config.slurm_time = 30
+        command = self.worker.prepareSbatch(1, 100, 0, 0, "job5", None, None)
+        assert any(
+            f"{TOIL_WORKER_TIME_LIMIT}=30" in argument for argument in command
+        ), command
+
+        # Without one, it is left to assume it has unlimited time.
+        self.worker.boss.config.slurm_time = None
+        command = self.worker.prepareSbatch(1, 100, 0, 0, "job5", None, None)
+        assert not any(TOIL_WORKER_TIME_LIMIT in argument for argument in command)
+
     def test_prepareSbatch_export(self):
         self.monkeypatch.setattr(toil.batchSystems.slurm, "call_command", call_sinfo)
         ps = toil.batchSystems.slurm.SlurmBatchSystem.PartitionSet()
         self.worker.boss.partitions = ps
 
+        # Other exported variables can follow the ALL, so match on the start.
+        def exports_all(command: list[str]) -> bool:
+            return any(argument.startswith("--export=ALL") for argument in command)
+
         # Without any overrides, we need --export=ALL
         command = self.worker.prepareSbatch(1, 100, 5, 0, "job5", None, None)
-        assert "--export=ALL" in command
+        assert exports_all(command)
 
         # With overrides, we don't get --export=ALL
         self.worker.boss.config.slurm_args = "--export=foo"
         command = self.worker.prepareSbatch(1, 100, 5, 0, "job5", None, None)
-        assert "--export=ALL" not in command
+        assert not exports_all(command)
 
         # With --export-file, we don't get --export=ALL as documented.
         self.worker.boss.config.slurm_args = "--export-file=./thefile.txt"
         command = self.worker.prepareSbatch(1, 100, 5, 0, "job5", None, None)
-        assert "--export=ALL" not in command
+        assert not exports_all(command)
 
     def test_option_detector(self):
         detector = toil.batchSystems.slurm.option_detector("foobar", "f")

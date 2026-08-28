@@ -13,18 +13,11 @@
 # limitations under the License.
 
 
-import os
-from unittest.mock import patch
-
 from toil.common import Config
 from toil.job import CheckpointJobDescription, JobDescription
 from toil.jobStores.fileJobStore import FileJobStore
 from toil.test import ToilTest
-from toil.worker import (
-    ALLOCATED_WALLTIME_ENV,
-    get_allocated_walltime,
-    nextChainable,
-)
+from toil.worker import nextChainable
 
 
 class WorkerTests(ToilTest):
@@ -166,18 +159,6 @@ class WorkerTests(ToilTest):
         )
         self.jobStore.assign_job_id(jobDesc)
         return self.jobStore.create_job(jobDesc)
-
-    def test_get_allocated_walltime_from_batch_system(self):
-        jobDesc = self._walltime_job_desc(100)
-        with patch.dict(os.environ, {ALLOCATED_WALLTIME_ENV: "0"}):
-            assert get_allocated_walltime(jobDesc) == 0
-
-    def test_get_allocated_walltime_unset(self):
-        jobDesc = self._walltime_job_desc(100)
-        environment = dict(os.environ)
-        environment.pop(ALLOCATED_WALLTIME_ENV, None)
-        with patch.dict(os.environ, environment, clear=True):
-            assert get_allocated_walltime(jobDesc) == 100
 
     def test_nextChainable_walltime_fits_in_remaining(self):
         predecessor = self._walltime_job_desc(100)
